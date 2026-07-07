@@ -18,7 +18,6 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from make_dashboard import load_workbook, build_dataset, render_html
 
@@ -78,7 +77,15 @@ if uploaded is not None:
     )
 
     st.divider()
-    components.html(html, height=3000, scrolling=True)
+    if hasattr(st, "iframe"):
+        # Streamlit >= 1.56: newer, non-deprecated API. Accepts a raw HTML
+        # string directly. A fixed height is used since the page container
+        # itself has no defined height for "stretch" to fill against.
+        st.iframe(html, height=3000)
+    else:
+        # Older Streamlit versions don't have st.iframe yet.
+        import streamlit.components.v1 as components
+        components.html(html, height=3000, scrolling=True)
 
 else:
     st.info("Waiting for a file upload to get started.")

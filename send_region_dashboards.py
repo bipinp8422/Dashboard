@@ -20,8 +20,8 @@ USAGE
     # Generate AND send both emails:
     python send_region_dashboards.py report.xlsm --send
 
-Sending mail requires SMTP settings as environment variables (nothing is
-hardcoded or stored in this file):
+Sending mail requires SMTP settings. For CLI use, set these as environment
+variables (nothing is hardcoded or stored in this file):
 
     SMTP_HOST       e.g. smtp.office365.com
     SMTP_PORT       e.g. 587
@@ -42,6 +42,13 @@ Example (Mac/Linux):
     export SMTP_USER=you@canon.co.in
     export SMTP_PASSWORD=your-app-password
     python send_region_dashboards.py report.xlsm --send
+
+send_email() also accepts an explicit `smtp_config` dict (host/port/user/
+password/sender) instead of environment variables -- this is what the
+Streamlit app (streamlit_app.py) uses so a "Send Now" button can fire an
+email with the attachment included automatically, without needing shell
+environment variables set. CLI behaviour is unchanged: no smtp_config ->
+falls back to the SMTP_* environment variables exactly as before.
 
 make_dashboard.py must sit in the same folder as this script -- it's
 imported directly for the data-processing and HTML-rendering functions.
@@ -134,18 +141,29 @@ def build_region_files(xlsm_path: Path, out_dir: Path, month_label: str):
     return north_path, south_path, meta
 
 
-def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path):
-    host = os.environ.get("SMTP_HOST")
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER")
-    password = os.environ.get("SMTP_PASSWORD")
-    sender = os.environ.get("SMTP_FROM", user)
+def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_config: dict | None = None):
+    """Send an email with `attachment_path` attached.
 
-    missing = [k for k, v in [("SMTP_HOST", host), ("SMTP_USER", user), ("SMTP_PASSWORD", password)] if not v]
+    smtp_config, if given, is a dict with any of: host, port, user, password,
+    sender. Any key left out (or the whole dict left as None) falls back to
+    the SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / SMTP_FROM
+    environment variables, exactly as before -- so existing CLI usage
+    (`--send` with env vars set) is unaffected. This lets a caller like the
+    Streamlit app supply credentials entered in the UI instead of requiring
+    shell environment variables.
+    """
+    cfg = smtp_config or {}
+    host = cfg.get("host") or os.environ.get("SMTP_HOST")
+    port = int(cfg.get("port") or os.environ.get("SMTP_PORT", "587"))
+    user = cfg.get("user") or os.environ.get("SMTP_USER")
+    password = cfg.get("password") or os.environ.get("SMTP_PASSWORD")
+    sender = cfg.get("sender") or os.environ.get("SMTP_FROM") or user
+
+    missing = [k for k, v in [("host/SMTP_HOST", host), ("user/SMTP_USER", user), ("password/SMTP_PASSWORD", password)] if not v]
     if missing:
-        sys.exit(
-            "Missing required environment variable(s): " + ", ".join(missing) +
-            "\nSet these before running with --send. See the top of this script for examples."
+        raise ValueError(
+            "Missing required SMTP setting(s): " + ", ".join(missing) +
+            ". Provide them via smtp_config, or set the matching SMTP_* environment variable before running with --send."
         )
 
     msg = EmailMessage()
@@ -169,6 +187,29 @@ def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path):
         server.send_message(msg, from_addr=sender, to_addrs=all_recipients)
 
     print(f"Sent: {subject}  ->  {len(all_recipients)} recipients")
+
+
+def region_email_content(region: str, month_label: str):
+    """Subject/body text for a region email. Shared by the CLI (`--send`)
+    and the Streamlit app so both always send identical wording."""
+    to_addrs = NORTH_TO if region == "North" else SOUTH_TO
+    cc_addrs = NORTH_CC if region == "North" else SOUTH_CC
+
+    subject = f"Denave x Canon CPP - Daily Performance Dashboard ({region}) - {month_label}"
+    body = (
+        "Hi all,\n\n"
+        f"Please find attached the daily performance dashboard for the {region} region for {month_label} "
+        "(month-to-date).\n\n"
+        f"The dashboard opens directly on the {region} view and includes:\n"
+        "- Daily revenue trend and pacing vs target\n"
+        "- Day-by-day breakdown (Day Explorer) - click any day for top reps, category mix, and top cities\n"
+        "- Product category mix\n"
+        "- Top and bottom performers\n"
+        "- FOM-wise team rollup\n\n"
+        "It's a standalone HTML file - just open it in any browser, no installation needed.\n\n"
+        "Regards,"
+    )
+    return to_addrs, cc_addrs, subject, body
 
 
 def main():
@@ -196,38 +237,11 @@ def main():
 
     month_label = meta["month_label"]
 
-    north_subject = f"Denave x Canon CPP - Daily Performance Dashboard (North) - {month_label}"
-    north_body = (
-        "Hi all,\n\n"
-        f"Please find attached the daily performance dashboard for the North region for {month_label} "
-        "(month-to-date).\n\n"
-        "The dashboard opens directly on the North view and includes:\n"
-        "- Daily revenue trend and pacing vs target\n"
-        "- Day-by-day breakdown (Day Explorer) - click any day for top reps, category mix, and top cities\n"
-        "- Product category mix\n"
-        "- Top and bottom performers\n"
-        "- FOM-wise team rollup\n\n"
-        "It's a standalone HTML file - just open it in any browser, no installation needed.\n\n"
-        "Regards,"
-    )
+    north_to, north_cc, north_subject, north_body = region_email_content("North", month_label)
+    south_to, south_cc, south_subject, south_body = region_email_content("South", month_label)
 
-    south_subject = f"Denave x Canon CPP - Daily Performance Dashboard (South) - {month_label}"
-    south_body = (
-        "Hi all,\n\n"
-        f"Please find attached the daily performance dashboard for the South region for {month_label} "
-        "(month-to-date).\n\n"
-        "The dashboard opens directly on the South view and includes:\n"
-        "- Daily revenue trend and pacing vs target\n"
-        "- Day-by-day breakdown (Day Explorer) - click any day for top reps, category mix, and top cities\n"
-        "- Product category mix\n"
-        "- Top and bottom performers\n"
-        "- FOM-wise team rollup\n\n"
-        "It's a standalone HTML file - just open it in any browser, no installation needed.\n\n"
-        "Regards,"
-    )
-
-    send_email(NORTH_TO, NORTH_CC, north_subject, north_body, north_path)
-    send_email(SOUTH_TO, SOUTH_CC, south_subject, south_body, south_path)
+    send_email(north_to, north_cc, north_subject, north_body, north_path)
+    send_email(south_to, south_cc, south_subject, south_body, south_path)
 
 
 if __name__ == "__main__":

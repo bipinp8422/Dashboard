@@ -6,17 +6,19 @@ file in a browser, builds the same HTML dashboard as make_dashboard.py, shows it
 inline, and gives you a button to download the standalone HTML file.
 
 It also lets you PREVIEW the North / South region emails (subject, recipients,
-body, and the exact dashboard that would be attached), and -- if this app is
-running on the SAME Windows machine as your Outlook desktop app -- open that
-exact preview as a real Outlook draft with one click, so you can double-check
-it and hit Send yourself. Nothing is ever sent automatically from this app.
+body, and the exact dashboard that would be attached), and open that same
+preview as a draft in whatever mail app your browser is set up with (Outlook,
+Gmail, etc.) via a mailto: link. Nothing is ever sent automatically from this
+app -- you review and hit Send yourself.
+
+Note on attachments: browsers block mailto: links from auto-attaching files
+(a long-standing security restriction, not something this app can bypass), so
+the dashboard file is offered as a separate download to attach by hand once
+the draft opens.
 
 RUN IT
 ------
     pip install streamlit pandas openpyxl
-    # Only needed for the "Open in Outlook" button, and only works on Windows
-    # with the Outlook desktop app installed and signed in:
-    pip install pywin32
     streamlit run streamlit_app.py
 
 Make sure make_dashboard.py and send_region_dashboards.py sit in the SAME
@@ -25,6 +27,7 @@ of duplicating them.
 """
 
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 import streamlit as st
@@ -81,39 +84,16 @@ def region_email_content(region: str, month_label: str):
     return to_addrs, cc_addrs, subject, body
 
 
-def open_in_outlook(to_addrs, cc_addrs, subject: str, body: str, attachment_path: Path):
-    """Create a real Outlook draft with .Display() -- opens the compose
-    window for the person to review and send themselves. Never calls
-    .Send(), so nothing goes out on its own.
-
-    Only works when this Streamlit app is running on the SAME Windows
-    machine as a signed-in Outlook desktop install (COM automation can't
-    reach across machines or into a browser-only/web Outlook session).
-    """
-    try:
-        import win32com.client
-    except ImportError:
-        return False, (
-            "The 'Open in Outlook' button needs the `pywin32` package, and only works when "
-            "this app runs on Windows with the Outlook desktop app installed "
-            "(`pip install pywin32`, then restart the app)."
-        )
-
-    try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        mail = outlook.CreateItem(0)  # 0 = olMailItem
-        mail.To = "; ".join(to_addrs)
-        mail.CC = "; ".join(cc_addrs)
-        mail.Subject = subject
-        mail.Body = body
-        mail.Attachments.Add(str(attachment_path.resolve()))
-        mail.Display()  # opens the draft window -- does NOT send it
-        return True, None
-    except Exception as e:
-        return False, (
-            "Couldn't open Outlook. Make sure the Outlook desktop app is installed, signed in, "
-            f"and running on this machine.\n\nDetails: {e}"
-        )
+def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
+    """Build a mailto: URL. Runs client-side in the browser -- your browser
+    (not this server) decides which mail app opens it, e.g. the Outlook
+    desktop app if it's your registered default handler for mailto: links."""
+    to = ",".join(to_addrs)
+    params = {"subject": subject, "body": body}
+    if cc_addrs:
+        params["cc"] = ",".join(cc_addrs)
+    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    return f"mailto:{to}?{query}"
 
 
 def show_email_preview(region: str, region_html: str, month_label: str, source_name: str):
@@ -135,27 +115,40 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             import streamlit.components.v1 as components
             components.html(region_html, height=1000, scrolling=True)
 
-    if st.button(f"📧 Open this in Outlook (draft, not sent)", key=f"outlook_{region}", use_container_width=True):
-        # Outlook attaches from a real file on disk, so write the exact
-        # previewed HTML out to a temp file first.
-        tmp_dir = Path(tempfile.mkdtemp())
-        attachment_path = tmp_dir / attachment_name
-        attachment_path.write_text(region_html, encoding="utf-8")
+    mailto_url = build_mailto_url(to_addrs, cc_addrs, subject, body)
 
-        with st.spinner("Opening Outlook..."):
-            ok, error = open_in_outlook(to_addrs, cc_addrs, subject, body, attachment_path)
-
-        if ok:
-            st.success(
-                f"Draft opened in Outlook for {region} -- exactly what's shown above. "
-                "Review it there and hit Send whenever you're ready."
+    oc1, oc2 = st.columns(2)
+    with oc1:
+        if hasattr(st, "link_button"):
+            st.link_button(
+                "📧 Open draft in your mail app", mailto_url, use_container_width=True
             )
         else:
-            st.error(error)
+            st.markdown(
+                f'<a href="{mailto_url}" target="_blank" '
+                f'style="display:block;text-align:center;padding:0.5rem;border:1px solid #999;'
+                f'border-radius:0.5rem;text-decoration:none;">📧 Open draft in your mail app</a>',
+                unsafe_allow_html=True,
+            )
+    with oc2:
+        st.download_button(
+            "⬇️ Download attachment (to attach manually)",
+            data=region_html,
+            file_name=attachment_name,
+            mime="text/html",
+            use_container_width=True,
+            key=f"dl_{region}",
+        )
 
-    st.info("Nothing is sent automatically. The button above only opens a draft in your "
-            "own Outlook for you to review and send -- or use "
-            "`python send_region_dashboards.py <file.xlsm> --send` for unattended SMTP sending.")
+    st.info(
+        "Clicking 'Open draft' hands off to whatever mail app your browser has set as default "
+        "(e.g. Outlook, if that's your default) with To/Cc/Subject/Body already filled in -- "
+        "nothing is sent automatically. Browsers block mailto: links from auto-attaching files "
+        "(a security restriction, not something this app can get around), so download the file "
+        "with the button on the right and attach it in the draft before sending. For unattended "
+        "sending with the attachment included automatically, use "
+        "`python send_region_dashboards.py <file.xlsm> --send` instead."
+    )
 
 
 if uploaded is not None:

@@ -177,10 +177,10 @@ def build_dataset(raw: pd.DataFrame, tgt: pd.DataFrame):
 
     def fmt_short(n):
         if n >= 10_000_000:
-            return f"Rs {n/10_000_000:.2f} Cr"
+            return f"\u20b9{n/10_000_000:.2f} Cr"
         if n >= 100_000:
-            return f"Rs {n/100_000:.1f} L"
-        return f"Rs {n:,.0f}"
+            return f"\u20b9{n/100_000:.1f} L"
+        return f"\u20b9{n:,.0f}"
 
     meta = dict(
         month_label=month_label, rep_count=total_reps, days_active=active_days,
@@ -213,7 +213,8 @@ def render_html(data: dict, meta: dict) -> str:
     html = (
         head + STYLE_CSS + "</head>" + body
         + "<script>const DATA = " + data_json + ";</script>"
-        + APP_JS + "</html>"
+        + "<script>" + APP_JS + "</script>"
+        + "</html>"
     )
     return html
 

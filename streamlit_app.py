@@ -13,24 +13,34 @@ button. Nothing is ever sent until you click that button.
 RUN IT
 ------
     pip install streamlit pandas openpyxl
+    pip install pywin32          # only needed for the Outlook-sending option (Windows)
     streamlit run streamlit_app.py
 
 Make sure make_dashboard.py and send_region_dashboards.py sit in the SAME
 folder as this file -- this app imports functions directly from both instead
 of duplicating them.
 
-SENDING EMAIL (SMTP)
----------------------
-Fill in the "Email sending settings" panel in the sidebar (host, port,
-username, password -- typically an app password, not your normal account
-password) once per session. These are kept only in memory for this
-Streamlit session and are never written to disk. Then use "✅ Send Now" on
-either region's preview to send that email immediately, attachment
-included -- no separate download-and-attach step.
+SENDING EMAIL
+--------------
+Two ways to send, chosen in the "Email sending settings" panel in the sidebar:
 
-If you'd rather not enter SMTP credentials in the browser, you can still run
-the equivalent from a terminal with SMTP_* environment variables set:
-    python send_region_dashboards.py <file.xlsm> --send
+  - Outlook desktop (default, recommended if you're on Windows with Outlook
+    installed): no password needed at all, since it drives the Outlook app
+    you're already signed into. Choose whether to open each email as a
+    normal Outlook draft (attachment already added, review then click Send
+    yourself) or send it immediately with no window.
+
+  - SMTP (advanced): needs real mail server credentials (host, port,
+    username, password -- typically an app password, not your normal
+    account password). Kept only in memory for this Streamlit session and
+    never written to disk.
+
+Either way, clicking the button on a region's preview attaches that
+region's dashboard automatically -- no separate download-and-attach step.
+
+Equivalent from a terminal, without opening Streamlit at all:
+    python send_region_dashboards.py <file.xlsm> --send --via outlook
+    python send_region_dashboards.py <file.xlsm> --send   (SMTP, needs SMTP_* env vars)
 """
 
 import tempfile
@@ -43,6 +53,7 @@ from send_region_dashboards import (
     render_region_only_dashboard,
     region_email_content,
     send_email,
+    send_via_outlook,
     NORTH_TO,
     NORTH_CC,
     SOUTH_TO,
@@ -72,10 +83,30 @@ uploaded = st.file_uploader(
 # ---------------------------------------------------------------------------
 # SMTP settings -- entered once per session, kept only in memory.
 # ---------------------------------------------------------------------------
-def smtp_settings_panel():
-    st.sidebar.header("✉️ Email sending settings (SMTP)")
+def sending_settings_panel():
+    st.sidebar.header("✉️ Email sending settings")
+
+    method = st.sidebar.radio(
+        "How should emails be sent?",
+        ["Outlook desktop (recommended, no password needed)", "SMTP (advanced, needs mail server credentials)"],
+        index=0,
+        key="send_method",
+    )
+
+    if method.startswith("Outlook"):
+        st.sidebar.caption(
+            "Uses the Outlook desktop app already signed in on this Windows machine -- "
+            "no password entry needed here at all."
+        )
+        send_immediately = st.sidebar.checkbox(
+            "Send immediately (skip review)",
+            value=False,
+            help="Off (default): opens each email as a normal Outlook draft, attachment already added, so you can look it over and click Send yourself. On: sends right away with no draft window.",
+        )
+        return {"method": "outlook", "send_immediately": send_immediately}
+
     st.sidebar.caption(
-        "Needed only if you want to use '✅ Send Now' below. Kept in memory for "
+        "Needed only if you want to use '✅ Send Now' with this method. Kept in memory for "
         "this browser session only -- never written to disk or shared."
     )
     host = st.sidebar.text_input("SMTP host", value=st.session_state.get("smtp_host", ""), placeholder="smtp.office365.com")
@@ -95,12 +126,16 @@ def smtp_settings_panel():
         st.sidebar.success("SMTP settings entered -- 'Send Now' is ready to use.")
     else:
         st.sidebar.info("Fill these in to enable 'Send Now'. Until then you can still preview and download.")
+
     return {
-        "host": host or None,
-        "port": port or None,
-        "user": user or None,
-        "password": password or None,
-        "sender": sender or None,
+        "method": "smtp",
+        "smtp_config": {
+            "host": host or None,
+            "port": port or None,
+            "user": user or None,
+            "password": password or None,
+            "sender": sender or None,
+        },
     }
 
 
@@ -119,7 +154,7 @@ def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
     return f"mailto:{to}?{query}"
 
 
-def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, smtp_config: dict):
+def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, send_settings: dict):
     to_addrs, cc_addrs, subject, body = region_email_content(region, month_label)
 
     st.markdown(f"#### ✉️ Email preview -- {region}")
@@ -138,12 +173,20 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             import streamlit.components.v1 as components
             components.html(region_html, height=1000, scrolling=True)
 
-    configured = bool(smtp_config["host"] and smtp_config["user"] and smtp_config["password"])
+    method = send_settings["method"]
+    if method == "outlook":
+        configured = True  # no credentials needed, just needs Outlook installed
+        button_label = "✅ Send Now via Outlook (attachment included automatically)" if send_settings["send_immediately"] \
+            else "✅ Open in Outlook (attachment included, review before sending)"
+    else:
+        cfg = send_settings["smtp_config"]
+        configured = bool(cfg["host"] and cfg["user"] and cfg["password"])
+        button_label = "✅ Send Now (attachment included automatically)"
 
     sc1, sc2 = st.columns(2)
     with sc1:
         send_clicked = st.button(
-            "✅ Send Now (attachment included automatically)",
+            button_label,
             use_container_width=True,
             type="primary",
             disabled=not configured,
@@ -163,7 +206,8 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
         st.warning("Fill in the SMTP settings in the sidebar to enable 'Send Now'.")
 
     if send_clicked:
-        with st.spinner(f"Sending {region} email to {len(to_addrs)} recipients..."):
+        spinner_msg = f"Preparing {region} email in Outlook..." if method == "outlook" else f"Sending {region} email to {len(to_addrs)} recipients..."
+        with st.spinner(spinner_msg):
             try:
                 with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
                     tmp.write(region_html.encode("utf-8"))
@@ -172,8 +216,18 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
                 real_attachment = tmp_path.with_name(attachment_name)
                 tmp_path.replace(real_attachment)
 
-                send_email(to_addrs, cc_addrs, subject, body, real_attachment, smtp_config=smtp_config)
-                st.success(f"Sent! {region} dashboard emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
+                if method == "outlook":
+                    send_via_outlook(
+                        to_addrs, cc_addrs, subject, body, real_attachment,
+                        send_immediately=send_settings["send_immediately"],
+                    )
+                    if send_settings["send_immediately"]:
+                        st.success(f"Sent! {region} dashboard emailed via Outlook to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
+                    else:
+                        st.success("Opened in Outlook -- attachment already added. Review it and click Send whenever you're ready.")
+                else:
+                    send_email(to_addrs, cc_addrs, subject, body, real_attachment, smtp_config=send_settings["smtp_config"])
+                    st.success(f"Sent! {region} dashboard emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
             except Exception as e:
                 st.error(f"Couldn't send the {region} email: {e}")
 
@@ -195,7 +249,7 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
         )
 
 
-smtp_config = smtp_settings_panel()
+send_settings = sending_settings_panel()
 
 if uploaded is not None:
     with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmp:
@@ -253,11 +307,11 @@ if uploaded is not None:
 
     if st.session_state.show_preview["North"]:
         north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
-        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, smtp_config)
+        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings)
 
     if st.session_state.show_preview["South"]:
         south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
-        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, smtp_config)
+        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings)
 
     st.divider()
     st.subheader("Full dashboard (All regions)")

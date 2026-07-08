@@ -55,7 +55,7 @@ import sys
 from email.message import EmailMessage
 from pathlib import Path
 
-from make_dashboard import load_workbook, build_dataset, render_html
+from make_dashboard import load_workbook, build_dataset, render_html, filter_by_region
 
 # ---------------------------------------------------------------------------
 # Recipient lists -- edit these if the distribution list changes.
@@ -81,37 +81,55 @@ SOUTH_CC = [
 ]
 
 
-def make_region_variant(html: str, region: str) -> str:
-    """Return a copy of the dashboard HTML that opens directly on `region`
-    ('North' or 'South') instead of 'All'."""
-    out = html.replace("let currentRegion = 'All';", f"let currentRegion = '{region}';")
-    out = out.replace(
-        '<button class="tab active" data-region="All">All Regions</button>\n'
-        '    <button class="tab" data-region="North">North</button>\n'
-        '    <button class="tab" data-region="South">South</button>',
-        '<button class="tab{all_active}" data-region="All">All Regions</button>\n'
-        '    <button class="tab{north_active}" data-region="North">North</button>\n'
-        '    <button class="tab{south_active}" data-region="South">South</button>'.format(
-            all_active=" active" if region == "All" else "",
-            north_active=" active" if region == "North" else "",
-            south_active=" active" if region == "South" else "",
-        ),
+# The tab-bar markup that lets a viewer flip between All/North/South. A
+# region-only dashboard has nothing else to flip to (the other region's rows
+# were never loaded into it), so this block is stripped out entirely rather
+# than just having its "active" tab changed.
+_FILTERS_BLOCK = (
+    '<div class="filters" id="regionFilters">\n'
+    '    <button class="tab active" data-region="All">All Regions</button>\n'
+    '    <button class="tab" data-region="North">North</button>\n'
+    '    <button class="tab" data-region="South">South</button>\n'
+    '  </div>'
+)
+
+
+def render_region_only_dashboard(raw, tgt, region: str, source_name: str) -> tuple[str, dict]:
+    """Build a dashboard whose underlying dataset ONLY contains `region`'s
+    rows -- not just a tab pre-selected on a dataset that still secretly
+    contains the other region. Returns (html, meta)."""
+    r_raw, r_tgt = filter_by_region(raw, tgt, region)
+    data, meta = build_dataset(r_raw, r_tgt)
+    meta["source_file"] = source_name
+    html = render_html(data, meta)
+
+    # There's only one region in the data now, so drop the switcher entirely
+    # instead of leaving a tab bar that implies other views exist.
+    html = html.replace(_FILTERS_BLOCK, "")
+    # Make the region scope visible in the title/header text itself.
+    html = html.replace(
+        "Daily Performance Cockpit</title>",
+        f"Daily Performance Cockpit — {region}</title>",
     )
-    return out
+    html = html.replace(
+        "<h1>Daily Performance Cockpit</h1>",
+        f"<h1>Daily Performance Cockpit <span style=\"color:var(--{region.lower()})\">— {region}</span></h1>",
+    )
+    return html, meta
 
 
 def build_region_files(xlsm_path: Path, out_dir: Path, month_label: str):
     raw, tgt = load_workbook(xlsm_path)
-    data, meta = build_dataset(raw, tgt)
-    meta["source_file"] = xlsm_path.name
-    base_html = render_html(data, meta)
 
     stem = xlsm_path.stem
     north_path = out_dir / f"{stem}_NORTH.html"
     south_path = out_dir / f"{stem}_SOUTH.html"
 
-    north_path.write_text(make_region_variant(base_html, "North"), encoding="utf-8")
-    south_path.write_text(make_region_variant(base_html, "South"), encoding="utf-8")
+    north_html, meta = render_region_only_dashboard(raw, tgt, "North", xlsm_path.name)
+    south_html, _ = render_region_only_dashboard(raw, tgt, "South", xlsm_path.name)
+
+    north_path.write_text(north_html, encoding="utf-8")
+    south_path.write_text(south_html, encoding="utf-8")
 
     return north_path, south_path, meta
 

@@ -6,15 +6,9 @@ file in a browser, builds the same HTML dashboard as make_dashboard.py, shows it
 inline, and gives you a button to download the standalone HTML file.
 
 It also lets you PREVIEW the North / South region emails (subject, recipients,
-body, and the exact dashboard that would be attached), and open that same
-preview as a draft in whatever mail app your browser is set up with (Outlook,
-Gmail, etc.) via a mailto: link. Nothing is ever sent automatically from this
-app -- you review and hit Send yourself.
-
-Note on attachments: browsers block mailto: links from auto-attaching files
-(a long-standing security restriction, not something this app can bypass), so
-the dashboard file is offered as a separate download to attach by hand once
-the draft opens.
+body, and the exact dashboard that would be attached), and then actually SEND
+that email -- with the dashboard attached automatically -- via the "✅ Send Now"
+button. Nothing is ever sent until you click that button.
 
 RUN IT
 ------
@@ -24,10 +18,22 @@ RUN IT
 Make sure make_dashboard.py and send_region_dashboards.py sit in the SAME
 folder as this file -- this app imports functions directly from both instead
 of duplicating them.
+
+SENDING EMAIL (SMTP)
+---------------------
+Fill in the "Email sending settings" panel in the sidebar (host, port,
+username, password -- typically an app password, not your normal account
+password) once per session. These are kept only in memory for this
+Streamlit session and are never written to disk. Then use "✅ Send Now" on
+either region's preview to send that email immediately, attachment
+included -- no separate download-and-attach step.
+
+If you'd rather not enter SMTP credentials in the browser, you can still run
+the equivalent from a terminal with SMTP_* environment variables set:
+    python send_region_dashboards.py <file.xlsm> --send
 """
 
 import tempfile
-import urllib.parse
 from pathlib import Path
 
 import streamlit as st
@@ -35,6 +41,8 @@ import streamlit as st
 from make_dashboard import load_workbook, build_dataset, render_html
 from send_region_dashboards import (
     render_region_only_dashboard,
+    region_email_content,
+    send_email,
     NORTH_TO,
     NORTH_CC,
     SOUTH_TO,
@@ -61,33 +69,48 @@ uploaded = st.file_uploader(
 )
 
 
-def region_email_content(region: str, month_label: str):
-    """Same subject/body text used in send_region_dashboards.py, kept here
-    only for preview purposes -- no email is sent from this app."""
-    to_addrs = NORTH_TO if region == "North" else SOUTH_TO
-    cc_addrs = NORTH_CC if region == "North" else SOUTH_CC
-
-    subject = f"Denave x Canon CPP - Daily Performance Dashboard ({region}) - {month_label}"
-    body = (
-        "Hi all,\n\n"
-        f"Please find attached the daily performance dashboard for the {region} region for {month_label} "
-        "(month-to-date).\n\n"
-        f"The dashboard opens directly on the {region} view and includes:\n"
-        "- Daily revenue trend and pacing vs target\n"
-        "- Day-by-day breakdown (Day Explorer) - click any day for top reps, category mix, and top cities\n"
-        "- Product category mix\n"
-        "- Top and bottom performers\n"
-        "- FOM-wise team rollup\n\n"
-        "It's a standalone HTML file - just open it in any browser, no installation needed.\n\n"
-        "Regards,"
+# ---------------------------------------------------------------------------
+# SMTP settings -- entered once per session, kept only in memory.
+# ---------------------------------------------------------------------------
+def smtp_settings_panel():
+    st.sidebar.header("✉️ Email sending settings (SMTP)")
+    st.sidebar.caption(
+        "Needed only if you want to use '✅ Send Now' below. Kept in memory for "
+        "this browser session only -- never written to disk or shared."
     )
-    return to_addrs, cc_addrs, subject, body
+    host = st.sidebar.text_input("SMTP host", value=st.session_state.get("smtp_host", ""), placeholder="smtp.office365.com")
+    port = st.sidebar.text_input("SMTP port", value=st.session_state.get("smtp_port", "587"))
+    user = st.sidebar.text_input("SMTP username (your email)", value=st.session_state.get("smtp_user", ""), placeholder="you@canon.co.in")
+    password = st.sidebar.text_input("SMTP password (or app password)", value=st.session_state.get("smtp_password", ""), type="password")
+    sender = st.sidebar.text_input("From address (optional, defaults to username)", value=st.session_state.get("smtp_sender", ""))
+
+    st.session_state["smtp_host"] = host
+    st.session_state["smtp_port"] = port
+    st.session_state["smtp_user"] = user
+    st.session_state["smtp_password"] = password
+    st.session_state["smtp_sender"] = sender
+
+    configured = bool(host and user and password)
+    if configured:
+        st.sidebar.success("SMTP settings entered -- 'Send Now' is ready to use.")
+    else:
+        st.sidebar.info("Fill these in to enable 'Send Now'. Until then you can still preview and download.")
+    return {
+        "host": host or None,
+        "port": port or None,
+        "user": user or None,
+        "password": password or None,
+        "sender": sender or None,
+    }
 
 
 def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
-    """Build a mailto: URL. Runs client-side in the browser -- your browser
-    (not this server) decides which mail app opens it, e.g. the Outlook
-    desktop app if it's your registered default handler for mailto: links."""
+    """Build a mailto: URL as a fallback for people who'd rather draft the
+    email themselves in their own mail client. Browsers block mailto: links
+    from auto-attaching files (a security restriction, not something this
+    app can bypass) -- that's exactly why 'Send Now' below exists as the
+    real one-click option."""
+    import urllib.parse
     to = ",".join(to_addrs)
     params = {"subject": subject, "body": body}
     if cc_addrs:
@@ -96,7 +119,7 @@ def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
     return f"mailto:{to}?{query}"
 
 
-def show_email_preview(region: str, region_html: str, month_label: str, source_name: str):
+def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, smtp_config: dict):
     to_addrs, cc_addrs, subject, body = region_email_content(region, month_label)
 
     st.markdown(f"#### ✉️ Email preview -- {region}")
@@ -106,7 +129,7 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     st.text_area(f"Body ({region})", value=body, height=220, disabled=True, key=f"body_{region}")
 
     attachment_name = f"{Path(source_name).stem}_{region.upper()}.html"
-    st.caption(f"📎 Attachment: {attachment_name}")
+    st.caption(f"📎 Attachment: {attachment_name} (included automatically when you send)")
 
     with st.expander(f"Preview attached dashboard ({region} view)"):
         if hasattr(st, "iframe"):
@@ -115,24 +138,20 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             import streamlit.components.v1 as components
             components.html(region_html, height=1000, scrolling=True)
 
-    mailto_url = build_mailto_url(to_addrs, cc_addrs, subject, body)
+    configured = bool(smtp_config["host"] and smtp_config["user"] and smtp_config["password"])
 
-    oc1, oc2 = st.columns(2)
-    with oc1:
-        if hasattr(st, "link_button"):
-            st.link_button(
-                "📧 Open draft in your mail app", mailto_url, use_container_width=True
-            )
-        else:
-            st.markdown(
-                f'<a href="{mailto_url}" target="_blank" '
-                f'style="display:block;text-align:center;padding:0.5rem;border:1px solid #999;'
-                f'border-radius:0.5rem;text-decoration:none;">📧 Open draft in your mail app</a>',
-                unsafe_allow_html=True,
-            )
-    with oc2:
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        send_clicked = st.button(
+            "✅ Send Now (attachment included automatically)",
+            use_container_width=True,
+            type="primary",
+            disabled=not configured,
+            key=f"send_{region}",
+        )
+    with sc2:
         st.download_button(
-            "⬇️ Download attachment (to attach manually)",
+            "⬇️ Download attachment (optional, e.g. to keep a copy)",
             data=region_html,
             file_name=attachment_name,
             mime="text/html",
@@ -140,16 +159,43 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             key=f"dl_{region}",
         )
 
-    st.info(
-        "Clicking 'Open draft' hands off to whatever mail app your browser has set as default "
-        "(e.g. Outlook, if that's your default) with To/Cc/Subject/Body already filled in -- "
-        "nothing is sent automatically. Browsers block mailto: links from auto-attaching files "
-        "(a security restriction, not something this app can get around), so download the file "
-        "with the button on the right and attach it in the draft before sending. For unattended "
-        "sending with the attachment included automatically, use "
-        "`python send_region_dashboards.py <file.xlsm> --send` instead."
-    )
+    if not configured:
+        st.warning("Fill in the SMTP settings in the sidebar to enable 'Send Now'.")
 
+    if send_clicked:
+        with st.spinner(f"Sending {region} email to {len(to_addrs)} recipients..."):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                    tmp.write(region_html.encode("utf-8"))
+                    tmp_path = Path(tmp.name)
+                # Give the temp file the same display name as the real attachment.
+                real_attachment = tmp_path.with_name(attachment_name)
+                tmp_path.replace(real_attachment)
+
+                send_email(to_addrs, cc_addrs, subject, body, real_attachment, smtp_config=smtp_config)
+                st.success(f"Sent! {region} dashboard emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
+            except Exception as e:
+                st.error(f"Couldn't send the {region} email: {e}")
+
+    with st.expander("Prefer to send from your own mail app instead?"):
+        mailto_url = build_mailto_url(to_addrs, cc_addrs, subject, body)
+        if hasattr(st, "link_button"):
+            st.link_button("📧 Open draft in your mail app", mailto_url, use_container_width=True)
+        else:
+            st.markdown(
+                f'<a href="{mailto_url}" target="_blank" '
+                f'style="display:block;text-align:center;padding:0.5rem;border:1px solid #999;'
+                f'border-radius:0.5rem;text-decoration:none;">📧 Open draft in your mail app</a>',
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "Browsers block mailto: links from auto-attaching files (a security restriction, "
+            "not something this app can get around), so you'd need to download the attachment "
+            "above and attach it yourself in that draft. 'Send Now' above skips all of that."
+        )
+
+
+smtp_config = smtp_settings_panel()
 
 if uploaded is not None:
     with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmp:
@@ -188,12 +234,12 @@ if uploaded is not None:
     )
 
     st.divider()
-    st.subheader("✉️ Preview region emails")
+    st.subheader("✉️ Region emails -- preview & send")
     st.caption(
         "See exactly what the North / South emails would look like -- recipients, subject, "
-        "body, and the attached dashboard -- without sending anything. The attached dashboard "
-        "is built only from that region's rows (the other region's data is never loaded into "
-        "it), so there's nothing to click over and see."
+        "body, and the attached dashboard -- then send with one click, attachment included "
+        "automatically. The attached dashboard is built only from that region's rows (the "
+        "other region's data is never loaded into it)."
     )
 
     pc1, pc2 = st.columns(2)
@@ -207,11 +253,11 @@ if uploaded is not None:
 
     if st.session_state.show_preview["North"]:
         north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
-        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name)
+        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, smtp_config)
 
     if st.session_state.show_preview["South"]:
         south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
-        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name)
+        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, smtp_config)
 
     st.divider()
     st.subheader("Full dashboard (All regions)")

@@ -17,8 +17,15 @@ USAGE
     # Just generate the two files (safe, no email sent):
     python send_region_dashboards.py report.xlsm
 
-    # Generate AND send both emails:
+    # Generate AND send both emails via SMTP:
     python send_region_dashboards.py report.xlsm --send
+
+    # Generate AND open both emails as Outlook drafts (Windows + Outlook desktop,
+    # no password needed -- review and click Send yourself in Outlook):
+    python send_region_dashboards.py report.xlsm --send --via outlook
+
+    # Same, but send immediately without opening a draft:
+    python send_region_dashboards.py report.xlsm --send --via outlook --outlook-send-immediately
 
 Sending mail requires SMTP settings. For CLI use, set these as environment
 variables (nothing is hardcoded or stored in this file):
@@ -141,7 +148,47 @@ def build_region_files(xlsm_path: Path, out_dir: Path, month_label: str):
     return north_path, south_path, meta
 
 
+def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_path: Path, send_immediately: bool = False):
+    """Send (or open) an email through the local Outlook desktop app via COM
+    automation -- no SMTP password needed, since it uses whatever account
+    Outlook is already signed into on this machine. Windows + Outlook
+    desktop only.
+
+    If send_immediately is False (the default), the email is opened as a
+    normal Outlook draft with the attachment already added, so you can look
+    it over and click Send yourself. If True, it's sent immediately without
+    opening a window.
+    """
+    try:
+        import win32com.client
+    except ImportError as e:
+        raise RuntimeError(
+            "This requires the 'pywin32' package (Windows + Outlook desktop only). "
+            "Install it with: pip install pywin32"
+        ) from e
+
+    attachment_path = Path(attachment_path).resolve()
+    if not attachment_path.exists():
+        raise FileNotFoundError(f"Attachment not found: {attachment_path}")
+
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)  # olMailItem
+    mail.To = "; ".join(to_addrs)
+    if cc_addrs:
+        mail.CC = "; ".join(cc_addrs)
+    mail.Subject = subject
+    mail.Body = body
+    mail.Attachments.Add(str(attachment_path))
+
+    if send_immediately:
+        mail.Send()
+    else:
+        mail.Display()
+    return mail
+
+
 def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_config: dict | None = None):
+
     """Send an email with `attachment_path` attached.
 
     smtp_config, if given, is a dict with any of: host, port, user, password,
@@ -215,9 +262,12 @@ def region_email_content(region: str, month_label: str):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", help="Path to the Sales_Representative_Target_vs_Achievement_Report_Denave_<Month>.xlsm file")
-    parser.add_argument("--send", action="store_true", help="Actually send the emails (requires SMTP_* environment variables). Without this flag, only the two HTML files are generated.")
+    parser.add_argument("--send", action="store_true", help="Actually send the emails. Uses SMTP_* environment variables by default. Without this flag, only the two HTML files are generated.")
+    parser.add_argument("--via", choices=["smtp", "outlook"], default="smtp", help="How to send when --send is used: 'smtp' (default, needs SMTP_* env vars) or 'outlook' (Windows + Outlook desktop, no password needed, opens as a draft unless --outlook-send-immediately is also given)")
+    parser.add_argument("--outlook-send-immediately", action="store_true", help="With --via outlook, send immediately instead of opening a draft for review")
     parser.add_argument("-o", "--output-dir", default=None, help="Directory to write the North/South HTML files (default: same folder as input)")
     args = parser.parse_args()
+
 
     in_path = Path(args.input)
     if not in_path.exists():
@@ -240,8 +290,12 @@ def main():
     north_to, north_cc, north_subject, north_body = region_email_content("North", month_label)
     south_to, south_cc, south_subject, south_body = region_email_content("South", month_label)
 
-    send_email(north_to, north_cc, north_subject, north_body, north_path)
-    send_email(south_to, south_cc, south_subject, south_body, south_path)
+    if args.via == "outlook":
+        send_via_outlook(north_to, north_cc, north_subject, north_body, north_path, send_immediately=args.outlook_send_immediately)
+        send_via_outlook(south_to, south_cc, south_subject, south_body, south_path, send_immediately=args.outlook_send_immediately)
+    else:
+        send_email(north_to, north_cc, north_subject, north_body, north_path)
+        send_email(south_to, south_cc, south_subject, south_body, south_path)
 
 
 if __name__ == "__main__":

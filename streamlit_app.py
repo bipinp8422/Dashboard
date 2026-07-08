@@ -6,12 +6,17 @@ file in a browser, builds the same HTML dashboard as make_dashboard.py, shows it
 inline, and gives you a button to download the standalone HTML file.
 
 It also lets you PREVIEW the North / South region emails (subject, recipients,
-body, and the exact dashboard that would be attached) without sending anything.
-Actual sending still only happens via send_region_dashboards.py --send.
+body, and the exact dashboard that would be attached), and -- if this app is
+running on the SAME Windows machine as your Outlook desktop app -- open that
+exact preview as a real Outlook draft with one click, so you can double-check
+it and hit Send yourself. Nothing is ever sent automatically from this app.
 
 RUN IT
 ------
     pip install streamlit pandas openpyxl
+    # Only needed for the "Open in Outlook" button, and only works on Windows
+    # with the Outlook desktop app installed and signed in:
+    pip install pywin32
     streamlit run streamlit_app.py
 
 Make sure make_dashboard.py and send_region_dashboards.py sit in the SAME
@@ -76,6 +81,41 @@ def region_email_content(region: str, month_label: str):
     return to_addrs, cc_addrs, subject, body
 
 
+def open_in_outlook(to_addrs, cc_addrs, subject: str, body: str, attachment_path: Path):
+    """Create a real Outlook draft with .Display() -- opens the compose
+    window for the person to review and send themselves. Never calls
+    .Send(), so nothing goes out on its own.
+
+    Only works when this Streamlit app is running on the SAME Windows
+    machine as a signed-in Outlook desktop install (COM automation can't
+    reach across machines or into a browser-only/web Outlook session).
+    """
+    try:
+        import win32com.client
+    except ImportError:
+        return False, (
+            "The 'Open in Outlook' button needs the `pywin32` package, and only works when "
+            "this app runs on Windows with the Outlook desktop app installed "
+            "(`pip install pywin32`, then restart the app)."
+        )
+
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)  # 0 = olMailItem
+        mail.To = "; ".join(to_addrs)
+        mail.CC = "; ".join(cc_addrs)
+        mail.Subject = subject
+        mail.Body = body
+        mail.Attachments.Add(str(attachment_path.resolve()))
+        mail.Display()  # opens the draft window -- does NOT send it
+        return True, None
+    except Exception as e:
+        return False, (
+            "Couldn't open Outlook. Make sure the Outlook desktop app is installed, signed in, "
+            f"and running on this machine.\n\nDetails: {e}"
+        )
+
+
 def show_email_preview(region: str, region_html: str, month_label: str, source_name: str):
     to_addrs, cc_addrs, subject, body = region_email_content(region, month_label)
 
@@ -84,7 +124,9 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     st.text_input(f"Cc ({region})", value=", ".join(cc_addrs), disabled=True, key=f"cc_{region}")
     st.text_input(f"Subject ({region})", value=subject, disabled=True, key=f"subj_{region}")
     st.text_area(f"Body ({region})", value=body, height=220, disabled=True, key=f"body_{region}")
-    st.caption(f"📎 Attachment: {Path(source_name).stem}_{region.upper()}.html")
+
+    attachment_name = f"{Path(source_name).stem}_{region.upper()}.html"
+    st.caption(f"📎 Attachment: {attachment_name}")
 
     with st.expander(f"Preview attached dashboard ({region} view)"):
         if hasattr(st, "iframe"):
@@ -93,9 +135,27 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             import streamlit.components.v1 as components
             components.html(region_html, height=1000, scrolling=True)
 
-    st.info("This is a preview only -- no email has been sent. To actually send it, "
-            "run `python send_region_dashboards.py <file.xlsm> --send` with your SMTP "
-            "environment variables set.")
+    if st.button(f"📧 Open this in Outlook (draft, not sent)", key=f"outlook_{region}", use_container_width=True):
+        # Outlook attaches from a real file on disk, so write the exact
+        # previewed HTML out to a temp file first.
+        tmp_dir = Path(tempfile.mkdtemp())
+        attachment_path = tmp_dir / attachment_name
+        attachment_path.write_text(region_html, encoding="utf-8")
+
+        with st.spinner("Opening Outlook..."):
+            ok, error = open_in_outlook(to_addrs, cc_addrs, subject, body, attachment_path)
+
+        if ok:
+            st.success(
+                f"Draft opened in Outlook for {region} -- exactly what's shown above. "
+                "Review it there and hit Send whenever you're ready."
+            )
+        else:
+            st.error(error)
+
+    st.info("Nothing is sent automatically. The button above only opens a draft in your "
+            "own Outlook for you to review and send -- or use "
+            "`python send_region_dashboards.py <file.xlsm> --send` for unattended SMTP sending.")
 
 
 if uploaded is not None:

@@ -26,7 +26,7 @@ import streamlit as st
 
 from make_dashboard import load_workbook, build_dataset, render_html
 from send_region_dashboards import (
-    make_region_variant,
+    render_region_only_dashboard,
     NORTH_TO,
     NORTH_CC,
     SOUTH_TO,
@@ -138,7 +138,9 @@ if uploaded is not None:
     st.subheader("✉️ Preview region emails")
     st.caption(
         "See exactly what the North / South emails would look like -- recipients, subject, "
-        "body, and the attached dashboard -- without sending anything."
+        "body, and the attached dashboard -- without sending anything. The attached dashboard "
+        "is built only from that region's rows (the other region's data is never loaded into "
+        "it), so there's nothing to click over and see."
     )
 
     pc1, pc2 = st.columns(2)
@@ -146,12 +148,12 @@ if uploaded is not None:
     preview_south = pc2.button("👁️ Preview South email", use_container_width=True)
 
     if preview_north:
-        north_html = make_region_variant(html, "North")
-        show_email_preview("North", north_html, meta["month_label"], uploaded.name)
+        north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
+        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name)
 
     if preview_south:
-        south_html = make_region_variant(html, "South")
-        show_email_preview("South", south_html, meta["month_label"], uploaded.name)
+        south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
+        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name)
 
     st.divider()
     st.subheader("Full dashboard (All regions)")

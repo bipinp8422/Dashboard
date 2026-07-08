@@ -204,14 +204,19 @@ if uploaded is not None:
     )
 
     pc1, pc2 = st.columns(2)
-    preview_north = pc1.button("👁️ Preview North email", use_container_width=True)
-    preview_south = pc2.button("👁️ Preview South email", use_container_width=True)
+    if "show_preview" not in st.session_state:
+        st.session_state.show_preview = {"North": False, "South": False}
 
-    if preview_north:
+    if pc1.button("👁️ Preview North email", use_container_width=True):
+        st.session_state.show_preview["North"] = True
+    if pc2.button("👁️ Preview South email", use_container_width=True):
+        st.session_state.show_preview["South"] = True
+
+    if st.session_state.show_preview["North"]:
         north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
         show_email_preview("North", north_html, north_meta["month_label"], uploaded.name)
 
-    if preview_south:
+    if st.session_state.show_preview["South"]:
         south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
         show_email_preview("South", south_html, south_meta["month_label"], uploaded.name)
 

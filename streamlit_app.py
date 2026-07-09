@@ -55,7 +55,6 @@ from send_region_dashboards import (
     send_email,
     send_via_outlook,
     build_region_source_workbook,
-    _convert_to_xlsx_if_needed,
     NORTH_TO,
     NORTH_CC,
     SOUTH_TO,
@@ -78,7 +77,7 @@ st.caption(
 uploaded = st.file_uploader(
     "Upload the report (.xlsm, .xlsb, or .xlsx)",
     type=["xlsm", "xlsb", "xlsx"],
-    help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports. .xlsb files are converted automatically (needs LibreOffice available on this machine).",
+    help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports. .xlsb files need the 'pyxlsb' package installed (pip install pyxlsb).",
 )
 
 
@@ -179,15 +178,11 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     # unnecessarily while the user is just looking at the preview.
     xlsx_cache_key = f"region_xlsx_bytes_{region}"
     if xlsx_cache_key not in st.session_state:
-        try:
-            with st.spinner(f"Building {region} region data workbook..."):
-                tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
-                build_region_source_workbook(original_upload_path, region, tmp_xlsx)
-                st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
-                tmp_xlsx.unlink(missing_ok=True)
-        except Exception as e:
-            st.error(f"Couldn't build the {region} Excel attachment.\n\n{e}")
-            st.stop()
+        with st.spinner(f"Building {region} region data workbook..."):
+            tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
+            build_region_source_workbook(original_upload_path, region, tmp_xlsx)
+            st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
+            tmp_xlsx.unlink(missing_ok=True)
     region_xlsx_bytes = st.session_state[xlsx_cache_key]
 
     method = send_settings["method"]
@@ -290,8 +285,7 @@ if uploaded is not None:
 
     try:
         with st.spinner("Reading workbook and crunching daily / regional / rep-level breakdowns..."):
-            working_path = _convert_to_xlsx_if_needed(tmp_path)
-            raw, tgt = load_workbook(working_path)
+            raw, tgt = load_workbook(tmp_path)
             data, meta = build_dataset(raw, tgt)
             meta["source_file"] = uploaded.name
             html = render_html(data, meta)
@@ -340,11 +334,11 @@ if uploaded is not None:
 
     if st.session_state.show_preview["North"]:
         north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
-        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings, working_path)
+        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings, tmp_path)
 
     if st.session_state.show_preview["South"]:
         south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
-        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings, working_path)
+        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings, tmp_path)
 
     st.divider()
     st.subheader("Full dashboard (All regions)")

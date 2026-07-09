@@ -179,11 +179,15 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     # unnecessarily while the user is just looking at the preview.
     xlsx_cache_key = f"region_xlsx_bytes_{region}"
     if xlsx_cache_key not in st.session_state:
-        with st.spinner(f"Building {region} region data workbook..."):
-            tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
-            build_region_source_workbook(original_upload_path, region, tmp_xlsx)
-            st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
-            tmp_xlsx.unlink(missing_ok=True)
+        try:
+            with st.spinner(f"Building {region} region data workbook..."):
+                tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
+                build_region_source_workbook(original_upload_path, region, tmp_xlsx)
+                st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
+                tmp_xlsx.unlink(missing_ok=True)
+        except Exception as e:
+            st.error(f"Couldn't build the {region} Excel attachment.\n\n{e}")
+            st.stop()
     region_xlsx_bytes = st.session_state[xlsx_cache_key]
 
     method = send_settings["method"]

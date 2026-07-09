@@ -419,16 +419,23 @@ def main():
     out_dir = Path(args.output_dir) if args.output_dir else in_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # .xlsb needs converting once up front (LibreOffice) -- both the HTML
+    # dashboard data and the Excel attachments are then built from that same
+    # converted file, so we don't depend on the 'pyxlsb' package at all.
     print(f"Reading {in_path.name} ...")
-    north_path, south_path, meta = build_region_files(in_path, out_dir, None)
+    working_path = _convert_to_xlsx_if_needed(in_path)
+    if working_path != in_path:
+        print(f"Converted .xlsb -> {working_path.name} (via LibreOffice)")
+
+    north_path, south_path, meta = build_region_files(working_path, out_dir, None)
     print(f"Wrote {north_path}")
     print(f"Wrote {south_path}")
 
     stem = in_path.stem
     north_xlsx = out_dir / f"{stem}_NORTH.xlsx"
     south_xlsx = out_dir / f"{stem}_SOUTH.xlsx"
-    build_region_source_workbook(in_path, "North", north_xlsx)
-    build_region_source_workbook(in_path, "South", south_xlsx)
+    build_region_source_workbook(working_path, "North", north_xlsx)
+    build_region_source_workbook(working_path, "South", south_xlsx)
     print(f"Wrote {north_xlsx}")
     print(f"Wrote {south_xlsx}")
 

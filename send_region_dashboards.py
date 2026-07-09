@@ -270,9 +270,13 @@ def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_paths, send_i
     return mail
 
 
-def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_config: dict | None = None):
+def send_email(to_addrs, cc_addrs, subject, body, attachment_paths, smtp_config: dict | None = None):
+    """Send an email with one or more files attached.
 
-    """Send an email with `attachment_path` attached.
+    attachment_paths can be a single path or a list of paths (e.g. the HTML
+    dashboard plus a region-filtered source workbook) -- all of them are
+    attached to the same email, each with its own correct MIME type guessed
+    from its extension (so an .xlsx doesn't get mislabeled as HTML, etc).
 
     smtp_config, if given, is a dict with any of: host, port, user, password,
     sender. Any key left out (or the whole dict left as None) falls back to
@@ -296,6 +300,11 @@ def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_co
             ". Provide them via smtp_config, or set the matching SMTP_* environment variable before running with --send."
         )
 
+    paths = _as_path_list(attachment_paths)
+    for p in paths:
+        if not p.exists():
+            raise FileNotFoundError(f"Attachment not found: {p}")
+
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = sender
@@ -304,10 +313,10 @@ def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_co
         msg["Cc"] = ", ".join(cc_addrs)
     msg.set_content(body)
 
-    with open(attachment_path, "rb") as f:
-        msg.add_attachment(
-            f.read(), maintype="text", subtype="html", filename=attachment_path.name
-        )
+    for p in paths:
+        maintype, subtype = _guess_maintype_subtype(p)
+        with open(p, "rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=p.name)
 
     all_recipients = to_addrs + cc_addrs
     context = ssl.create_default_context()
@@ -375,6 +384,14 @@ def main():
     print(f"Wrote {north_path}")
     print(f"Wrote {south_path}")
 
+    stem = in_path.stem
+    north_xlsx = out_dir / f"{stem}_NORTH.xlsx"
+    south_xlsx = out_dir / f"{stem}_SOUTH.xlsx"
+    build_region_source_workbook(in_path, "North", north_xlsx)
+    build_region_source_workbook(in_path, "South", south_xlsx)
+    print(f"Wrote {north_xlsx}")
+    print(f"Wrote {south_xlsx}")
+
     if not args.send:
         print("\n--send not passed, so no email was sent. Attach these files manually, or re-run with --send.")
         return
@@ -384,12 +401,15 @@ def main():
     north_to, north_cc, north_subject, north_body = region_email_content("North", month_label)
     south_to, south_cc, south_subject, south_body = region_email_content("South", month_label)
 
+    north_attachments = [north_path, north_xlsx]
+    south_attachments = [south_path, south_xlsx]
+
     if args.via == "outlook":
-        send_via_outlook(north_to, north_cc, north_subject, north_body, north_path, send_immediately=args.outlook_send_immediately)
-        send_via_outlook(south_to, south_cc, south_subject, south_body, south_path, send_immediately=args.outlook_send_immediately)
+        send_via_outlook(north_to, north_cc, north_subject, north_body, north_attachments, send_immediately=args.outlook_send_immediately)
+        send_via_outlook(south_to, south_cc, south_subject, south_body, south_attachments, send_immediately=args.outlook_send_immediately)
     else:
-        send_email(north_to, north_cc, north_subject, north_body, north_path)
-        send_email(south_to, south_cc, south_subject, south_body, south_path)
+        send_email(north_to, north_cc, north_subject, north_body, north_attachments)
+        send_email(south_to, south_cc, south_subject, south_body, south_attachments)
 
 
 if __name__ == "__main__":

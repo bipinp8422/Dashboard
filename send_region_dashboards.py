@@ -74,6 +74,17 @@ import pandas as pd
 
 from make_dashboard import load_workbook, build_dataset, render_html, filter_by_region
 
+# Optional convenience: if a .env file sits next to this script (see
+# .env.example), load SMTP_* values from it automatically so you don't have
+# to `export` them by hand every time. Silently does nothing if the
+# python-dotenv package isn't installed or no .env file is present -- CLI
+# behaviour with real environment variables is unaffected either way.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Recipient lists -- edit these if the distribution list changes.
 # ---------------------------------------------------------------------------

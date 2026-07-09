@@ -111,6 +111,18 @@ SOUTH_CC = [
     "Ujjwal.JoshiTEMP@canon.co.in", "shashanks@denave.com", "ce-nikhil.verma@denave.com",
 ]
 
+# The only sheets kept in the region-filtered Excel attachment -- any other
+# sheet present in the source workbook (e.g. helper/scratch tabs) is
+# dropped. Order here is also the order they end up in in the output file.
+ALLOWED_SHEETS = [
+    "Achievement_Summary",
+    "Car Counter Count",
+    "Alpha Champs",
+    "Target vs Achievement",
+    "Alpha Program Sell-Out",
+    "Raw Data",
+]
+
 
 # The tab-bar markup that lets a viewer flip between All/North/South. A
 # region-only dashboard has nothing else to flip to (the other region's rows
@@ -194,11 +206,16 @@ def build_region_source_workbook(source_path: Path, region: str, out_path: Path)
     widths/merged header cells/number formats -- instead of rebuilding it
     cell-by-cell from raw pandas values (which threw all formatting away).
 
-    For each sheet, the header row + Region column are auto-detected (same
-    logic as before), and every data row whose Region value doesn't match
-    `region` is deleted outright (bottom-to-top, so row indices stay valid).
-    Sheets with no detectable "Region" column are left completely untouched
-    rather than guessed at.
+    Only these sheets are kept in the output, in this order -- any other
+    sheet present in the source workbook is dropped entirely:
+        Achievement_Summary, Car Counter Count, Alpha Champs,
+        Target vs Achievement, Alpha Program Sell-Out, Raw Data
+
+    For each kept sheet, the header row + Region column are auto-detected
+    (same logic as before), and every data row whose Region value doesn't
+    match `region` is deleted outright (bottom-to-top, so row indices stay
+    valid). Sheets with no detectable "Region" column have their rows left
+    untouched rather than guessed at.
 
     Handles .xlsb sources transparently by converting to .xlsx via
     LibreOffice first (openpyxl can't read/write .xlsb directly).
@@ -208,6 +225,15 @@ def build_region_source_workbook(source_path: Path, region: str, out_path: Path)
 
     xlsx_source = _convert_to_xlsx_if_needed(source_path)
     wb = load_xlsx_workbook(xlsx_source)
+
+    # Drop any sheet not on the allowed list.
+    for sheet_name in list(wb.sheetnames):
+        if sheet_name not in ALLOWED_SHEETS:
+            wb.remove(wb[sheet_name])
+
+    # Put the surviving sheets in the exact order requested.
+    ordered = [name for name in ALLOWED_SHEETS if name in wb.sheetnames]
+    wb._sheets.sort(key=lambda ws: ordered.index(ws.title))
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]

@@ -64,30 +64,15 @@ imported directly for the data-processing and HTML-rendering functions.
 import argparse
 import mimetypes
 import os
-import shutil
 import smtplib
 import ssl
-import subprocess
 import sys
-import tempfile
 from email.message import EmailMessage
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import load_workbook as load_xlsx_workbook
 
 from make_dashboard import load_workbook, build_dataset, render_html, filter_by_region
-
-# Optional convenience: if a .env file sits next to this script (see
-# .env.example), load SMTP_* values from it automatically so you don't have
-# to `export` them by hand every time. Silently does nothing if the
-# python-dotenv package isn't installed or no .env file is present -- CLI
-# behaviour with real environment variables is unaffected either way.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env")
-except ImportError:
-    pass
 
 # ---------------------------------------------------------------------------
 # Recipient lists -- edit these if the distribution list changes.
@@ -110,18 +95,6 @@ SOUTH_TO = [
 SOUTH_CC = [
     "KSHarihara.Prasad@canon.co.in", "Garima.Mohendroo@canon.co.in", "sujesh.soman@canon.co.in",
     "Ujjwal.JoshiTEMP@canon.co.in", "shashanks@denave.com", "ce-nikhil.verma@denave.com",
-]
-
-# The only sheets kept in the region-filtered Excel attachment -- any other
-# sheet present in the source workbook (e.g. helper/scratch tabs) is
-# dropped. Order here is also the order they end up in in the output file.
-ALLOWED_SHEETS = [
-    "Achievement_Summary",
-    "Car Counter Count",
-    "Alpha Champs",
-    "Target vs Achievement",
-    "Alpha Program Sell-Out",
-    "Raw Data",
 ]
 
 
@@ -162,218 +135,59 @@ def render_region_only_dashboard(raw, tgt, region: str, source_name: str) -> tup
     return html, meta
 
 
-def _detect_header_row_and_region_col_ws(ws, max_scan: int = 6):
-    """Scan the first few rows of an openpyxl worksheet for the cell that
-    literally reads "Region" -- that's the real header row for sheets like
-    these, which often have title/threshold rows above it. Returns
-    (header_row_index, region_column_index), both 1-based, or (None, None)
-    if no such cell is found in the first `max_scan` rows.
+def _detect_header_row_and_region_col(df_raw: pd.DataFrame, max_scan: int = 6):
+    """Scan the first few rows of a raw (header=None) sheet for the row that
+    contains a cell literally reading "Region" -- that's the real header row
+    for sheets like these, which often have title/threshold rows above it.
+    Returns (header_row_index, region_column_index), or (None, None) if no
+    such row is found in the first `max_scan` rows.
     """
-    for r in range(1, max_scan + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
+    for r in range(min(max_scan, len(df_raw))):
+        row_vals = df_raw.iloc[r].tolist()
+        for c, v in enumerate(row_vals):
             if isinstance(v, str) and v.strip().lower() == "region":
                 return r, c
     return None, None
 
 
-def _require_soffice():
-    """Raise a clear, actionable error if LibreOffice isn't installed on
-    this machine, instead of letting subprocess.run blow up with a bare
-    FileNotFoundError. Needed for .xlsb conversion and for baking formulas
-    down to values -- both features depend on LibreOffice being present.
+def filter_sheet_by_region(df_raw: pd.DataFrame, region: str) -> pd.DataFrame:
+    """Filter a raw (header=None) sheet down to rows matching `region`.
 
-    On Streamlit Community Cloud specifically: add a file named
-    packages.txt (next to requirements.txt, in the repo root) containing
-    just the line "libreoffice" -- Streamlit Cloud runs apt-get on
-    anything listed there before starting the app.
+    Any rows above the detected header (titles, threshold rows, etc.) are
+    kept as-is; the header row itself is always kept; every data row below
+    it is kept only if its Region-column value matches `region`
+    (case-insensitive, whitespace-trimmed). If no "Region" column can be
+    found in the first few rows, the sheet is returned unchanged rather than
+    guessed at -- safer to leave a sheet un-filtered than to silently drop
+    rows using the wrong column.
     """
-    if shutil.which("soffice") is None:
-        raise RuntimeError(
-            "LibreOffice ('soffice') isn't installed on this machine, but it's required "
-            "to handle .xlsb files and to bake formulas down to plain values. "
-            "If you're running this on Streamlit Community Cloud: add a file named "
-            "packages.txt to the repo (same folder as requirements.txt) containing just "
-            "the line 'libreoffice', then redeploy -- Streamlit Cloud will install it "
-            "automatically. On your own machine/server: install LibreOffice normally "
-            "(e.g. 'apt-get install libreoffice' on Linux, or download it from "
-            "libreoffice.org on Windows/Mac)."
-        )
+    header_row, region_col = _detect_header_row_and_region_col(df_raw)
+    if header_row is None:
+        return df_raw
 
-
-def _convert_to_xlsx_if_needed(source_path: Path) -> Path:
-    """openpyxl can only read/write .xlsx/.xlsm, not the binary .xlsb
-    format. If the source is .xlsb, convert it to .xlsx with LibreOffice
-    first -- a real spreadsheet-engine conversion, so every sheet's fonts,
-    fills, column widths, merged cells, and number formats come through
-    unchanged. Returns the source path itself if no conversion is needed.
-    """
-    if source_path.suffix.lower() in (".xlsx", ".xlsm"):
-        return source_path
-
-    _require_soffice()
-    tmp_dir = Path(tempfile.mkdtemp(prefix="xlsb_convert_"))
-    result = subprocess.run(
-        ["soffice", "--headless", "--convert-to", "xlsx", "--outdir", str(tmp_dir), str(source_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    converted = tmp_dir / (source_path.stem + ".xlsx")
-    if result.returncode != 0 or not converted.exists():
-        raise RuntimeError(
-            f"LibreOffice conversion of {source_path.name} to .xlsx failed: "
-            f"{result.stderr or result.stdout}"
-        )
-    return converted
-
-
-# ---------------------------------------------------------------------------
-# Formula -> value flattening ("Paste Special -> Values" over the whole
-# workbook). Source reports sometimes have formula-driven columns (e.g. a
-# computed Revenue or "Helping Column" in Raw Data). Two problems with
-# leaving those formulas in the attachment:
-#   1. openpyxl never evaluates formulas, so a cell can come through with no
-#      cached value at all -- just the formula string, showing as 0/blank
-#      until someone opens it in Excel.
-#   2. openpyxl also doesn't rewrite formula references when rows are
-#      deleted, so after region-filtering, a formula like "=W2" can end up
-#      pointing at a completely different row's data than it originally did.
-# Baking every formula down to its plain computed value BEFORE any rows are
-# deleted sidesteps both issues, and matches a manual "Paste Special ->
-# Values" -- formatting (fonts, fills, number formats, column widths) is
-# completely unaffected, only the underlying cell content changes.
-# ---------------------------------------------------------------------------
-
-_RECALC_MACRO_LINUX = Path("~/.config/libreoffice/4/user/basic/Standard/Module1.xba").expanduser()
-_RECALC_MACRO_MACOS = Path("~/Library/Application Support/LibreOffice/4/user/basic/Standard/Module1.xba").expanduser()
-_RECALC_MACRO_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
-<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">
-    Sub RecalculateAndSave()
-      ThisComponent.calculateAll()
-      ThisComponent.store()
-      ThisComponent.close(True)
-    End Sub
-</script:module>"""
-
-
-def _ensure_recalc_macro_installed():
-    """One-time setup: drop a tiny LibreOffice Basic macro into the user's
-    LibreOffice profile that recalculates every formula in a workbook and
-    saves it in place. No-op if it's already there."""
-    import platform
-    macro_path = _RECALC_MACRO_MACOS if platform.system() == "Darwin" else _RECALC_MACRO_LINUX
-    if macro_path.exists() and "RecalculateAndSave" in macro_path.read_text():
-        return
-    macro_path.parent.mkdir(parents=True, exist_ok=True)
-    if not macro_path.parent.parent.exists():
-        # Profile doesn't exist yet -- a throwaway headless launch creates it.
-        subprocess.run(["soffice", "--headless", "--terminate_after_init"], capture_output=True, timeout=20)
-        macro_path.parent.mkdir(parents=True, exist_ok=True)
-    macro_path.write_text(_RECALC_MACRO_XML)
-
-
-def _recalculate_xlsx_in_place(xlsx_path: Path, timeout: int = 60):
-    """Force LibreOffice to recalculate every formula in xlsx_path and save
-    the refreshed cached values back into that same file."""
-    _require_soffice()
-    _ensure_recalc_macro_installed()
-    subprocess.run(
-        [
-            "soffice", "--headless", "--norestore",
-            "vnd.sun.star.script:Standard.Module1.RecalculateAndSave?language=Basic&location=application",
-            str(xlsx_path.resolve()),
-        ],
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def _flatten_formulas_to_values(xlsx_path: Path) -> Path:
-    """Return the path to a private temp copy of xlsx_path where every
-    formula cell has been replaced by its computed value -- everything
-    else (styles, column widths, merges) is untouched. The original file
-    is never modified."""
-    work_copy = Path(tempfile.mkstemp(suffix=".xlsx")[1])
-    import shutil
-    shutil.copyfile(xlsx_path, work_copy)
-
-    _recalculate_xlsx_in_place(work_copy)
-
-    wb_formulas = load_xlsx_workbook(work_copy, data_only=False)
-    wb_values = load_xlsx_workbook(work_copy, data_only=True)
-
-    for sheet_name in wb_formulas.sheetnames:
-        ws_f = wb_formulas[sheet_name]
-        ws_v = wb_values[sheet_name]
-        for row in ws_f.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    cell.value = ws_v[cell.coordinate].value
-
-    flattened_path = Path(tempfile.mkstemp(suffix=".xlsx")[1])
-    wb_formulas.save(flattened_path)
-    return flattened_path
+    data = df_raw.iloc[header_row + 1:]
+    mask = data[region_col].astype(str).str.strip().str.lower() == region.strip().lower()
+    filtered_data = data[mask]
+    return pd.concat([df_raw.iloc[:header_row + 1], filtered_data], ignore_index=True)
 
 
 def build_region_source_workbook(source_path: Path, region: str, out_path: Path) -> Path:
-    """Build the region-filtered attachment by editing a real copy of the
-    ORIGINAL source workbook -- same sheet names, same fonts/fills/column
-    widths/merged header cells/number formats -- instead of rebuilding it
-    cell-by-cell from raw pandas values (which threw all formatting away).
-
-    Only these sheets are kept in the output, in this order -- any other
-    sheet present in the source workbook is dropped entirely:
-        Achievement_Summary, Car Counter Count, Alpha Champs,
-        Target vs Achievement, Alpha Program Sell-Out, Raw Data
-
-    Every formula in the workbook is recalculated and baked down to its
-    plain computed value first (see _flatten_formulas_to_values) -- this is
-    what makes the row deletion below safe, since a formula's reference
-    could otherwise end up pointing at the wrong row once rows are removed.
-
-    For each kept sheet, the header row + Region column are auto-detected
-    (same logic as before), and every data row whose Region value doesn't
-    match `region` is deleted outright (bottom-to-top, so row indices stay
-    valid). Sheets with no detectable "Region" column have their rows left
-    untouched rather than guessed at.
-
-    Handles .xlsb sources transparently by converting to .xlsx via
-    LibreOffice first (openpyxl can't read/write .xlsb directly).
+    """Read every sheet from the ORIGINAL source workbook (.xlsm, .xlsx, or
+    .xlsb -- .xlsb requires the 'pyxlsb' package) and write a new .xlsx
+    workbook with the same sheet names, each filtered down to just
+    `region`'s rows using filter_sheet_by_region. This is the "respective
+    region data" attachment -- a full region-filtered copy of the source
+    workbook, distinct from the HTML dashboard.
     """
     source_path = Path(source_path)
     out_path = Path(out_path)
-
-    xlsx_source = _convert_to_xlsx_if_needed(source_path)
-    values_only_source = _flatten_formulas_to_values(xlsx_source)
-    wb = load_xlsx_workbook(values_only_source)
-
-    # Drop any sheet not on the allowed list.
-    for sheet_name in list(wb.sheetnames):
-        if sheet_name not in ALLOWED_SHEETS:
-            wb.remove(wb[sheet_name])
-
-    # Put the surviving sheets in the exact order requested.
-    ordered = [name for name in ALLOWED_SHEETS if name in wb.sheetnames]
-    wb._sheets.sort(key=lambda ws: ordered.index(ws.title))
-
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        header_row, region_col = _detect_header_row_and_region_col_ws(ws)
-        if header_row is None:
-            continue
-
-        target = region.strip().lower()
-        for r in range(ws.max_row, header_row, -1):
-            val = ws.cell(row=r, column=region_col).value
-            val_str = str(val).strip().lower() if val is not None else ""
-            # Only drop rows that explicitly belong to a DIFFERENT region.
-            # Blank-region rows (Total/subtotal rows, spacer rows) are left
-            # alone -- they're not data for the other region, so removing
-            # them would just be silently deleting part of the original
-            # sheet's own structure (e.g. a summary sheet's "Total" row).
-            if val_str and val_str != target:
-                ws.delete_rows(r, 1)
-
-    wb.save(out_path)
+    xls = pd.ExcelFile(source_path)
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for sheet_name in xls.sheet_names:
+            df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            filtered = filter_sheet_by_region(df_raw, region)
+            # Excel sheet names are capped at 31 characters.
+            filtered.to_excel(writer, sheet_name=sheet_name[:31], header=False, index=False)
     return out_path
 
 
@@ -565,23 +379,16 @@ def main():
     out_dir = Path(args.output_dir) if args.output_dir else in_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # .xlsb needs converting once up front (LibreOffice) -- both the HTML
-    # dashboard data and the Excel attachments are then built from that same
-    # converted file, so we don't depend on the 'pyxlsb' package at all.
     print(f"Reading {in_path.name} ...")
-    working_path = _convert_to_xlsx_if_needed(in_path)
-    if working_path != in_path:
-        print(f"Converted .xlsb -> {working_path.name} (via LibreOffice)")
-
-    north_path, south_path, meta = build_region_files(working_path, out_dir, None)
+    north_path, south_path, meta = build_region_files(in_path, out_dir, None)
     print(f"Wrote {north_path}")
     print(f"Wrote {south_path}")
 
     stem = in_path.stem
     north_xlsx = out_dir / f"{stem}_NORTH.xlsx"
     south_xlsx = out_dir / f"{stem}_SOUTH.xlsx"
-    build_region_source_workbook(working_path, "North", north_xlsx)
-    build_region_source_workbook(working_path, "South", south_xlsx)
+    build_region_source_workbook(in_path, "North", north_xlsx)
+    build_region_source_workbook(in_path, "South", south_xlsx)
     print(f"Wrote {north_xlsx}")
     print(f"Wrote {south_xlsx}")
 

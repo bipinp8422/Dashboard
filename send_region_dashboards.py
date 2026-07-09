@@ -62,12 +62,15 @@ imported directly for the data-processing and HTML-rendering functions.
 """
 
 import argparse
+import mimetypes
 import os
 import smtplib
 import ssl
 import sys
 from email.message import EmailMessage
 from pathlib import Path
+
+import pandas as pd
 
 from make_dashboard import load_workbook, build_dataset, render_html, filter_by_region
 
@@ -132,6 +135,62 @@ def render_region_only_dashboard(raw, tgt, region: str, source_name: str) -> tup
     return html, meta
 
 
+def _detect_header_row_and_region_col(df_raw: pd.DataFrame, max_scan: int = 6):
+    """Scan the first few rows of a raw (header=None) sheet for the row that
+    contains a cell literally reading "Region" -- that's the real header row
+    for sheets like these, which often have title/threshold rows above it.
+    Returns (header_row_index, region_column_index), or (None, None) if no
+    such row is found in the first `max_scan` rows.
+    """
+    for r in range(min(max_scan, len(df_raw))):
+        row_vals = df_raw.iloc[r].tolist()
+        for c, v in enumerate(row_vals):
+            if isinstance(v, str) and v.strip().lower() == "region":
+                return r, c
+    return None, None
+
+
+def filter_sheet_by_region(df_raw: pd.DataFrame, region: str) -> pd.DataFrame:
+    """Filter a raw (header=None) sheet down to rows matching `region`.
+
+    Any rows above the detected header (titles, threshold rows, etc.) are
+    kept as-is; the header row itself is always kept; every data row below
+    it is kept only if its Region-column value matches `region`
+    (case-insensitive, whitespace-trimmed). If no "Region" column can be
+    found in the first few rows, the sheet is returned unchanged rather than
+    guessed at -- safer to leave a sheet un-filtered than to silently drop
+    rows using the wrong column.
+    """
+    header_row, region_col = _detect_header_row_and_region_col(df_raw)
+    if header_row is None:
+        return df_raw
+
+    data = df_raw.iloc[header_row + 1:]
+    mask = data[region_col].astype(str).str.strip().str.lower() == region.strip().lower()
+    filtered_data = data[mask]
+    return pd.concat([df_raw.iloc[:header_row + 1], filtered_data], ignore_index=True)
+
+
+def build_region_source_workbook(source_path: Path, region: str, out_path: Path) -> Path:
+    """Read every sheet from the ORIGINAL source workbook (.xlsm, .xlsx, or
+    .xlsb -- .xlsb requires the 'pyxlsb' package) and write a new .xlsx
+    workbook with the same sheet names, each filtered down to just
+    `region`'s rows using filter_sheet_by_region. This is the "respective
+    region data" attachment -- a full region-filtered copy of the source
+    workbook, distinct from the HTML dashboard.
+    """
+    source_path = Path(source_path)
+    out_path = Path(out_path)
+    xls = pd.ExcelFile(source_path)
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for sheet_name in xls.sheet_names:
+            df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            filtered = filter_sheet_by_region(df_raw, region)
+            # Excel sheet names are capped at 31 characters.
+            filtered.to_excel(writer, sheet_name=sheet_name[:31], header=False, index=False)
+    return out_path
+
+
 def build_region_files(xlsm_path: Path, out_dir: Path, month_label: str):
     raw, tgt = load_workbook(xlsm_path)
 
@@ -148,16 +207,38 @@ def build_region_files(xlsm_path: Path, out_dir: Path, month_label: str):
     return north_path, south_path, meta
 
 
-def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_path: Path, send_immediately: bool = False):
+def _as_path_list(attachment_paths) -> list[Path]:
+    """Accept either a single path or a list/tuple of paths and always
+    return a list of Path objects, so send_email / send_via_outlook can
+    attach one file (e.g. just the dashboard) or several (e.g. the
+    dashboard plus the region-filtered source workbook)."""
+    if isinstance(attachment_paths, (list, tuple)):
+        return [Path(p) for p in attachment_paths]
+    return [Path(attachment_paths)]
+
+
+def _guess_maintype_subtype(path: Path) -> tuple[str, str]:
+    ctype, _ = mimetypes.guess_type(str(path))
+    if ctype is None:
+        ctype = "application/octet-stream"
+    maintype, _, subtype = ctype.partition("/")
+    return maintype, subtype or "octet-stream"
+
+
+def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_paths, send_immediately: bool = False):
     """Send (or open) an email through the local Outlook desktop app via COM
     automation -- no SMTP password needed, since it uses whatever account
     Outlook is already signed into on this machine. Windows + Outlook
     desktop only.
 
+    attachment_paths can be a single path or a list of paths (e.g. the HTML
+    dashboard plus a region-filtered source workbook) -- all of them are
+    attached to the same email.
+
     If send_immediately is False (the default), the email is opened as a
-    normal Outlook draft with the attachment already added, so you can look
-    it over and click Send yourself. If True, it's sent immediately without
-    opening a window.
+    normal Outlook draft with the attachment(s) already added, so you can
+    look it over and click Send yourself. If True, it's sent immediately
+    without opening a window.
     """
     try:
         import win32com.client
@@ -167,9 +248,10 @@ def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_path: Path, s
             "Install it with: pip install pywin32"
         ) from e
 
-    attachment_path = Path(attachment_path).resolve()
-    if not attachment_path.exists():
-        raise FileNotFoundError(f"Attachment not found: {attachment_path}")
+    paths = _as_path_list(attachment_paths)
+    for p in paths:
+        if not p.exists():
+            raise FileNotFoundError(f"Attachment not found: {p}")
 
     outlook = win32com.client.Dispatch("Outlook.Application")
     mail = outlook.CreateItem(0)  # olMailItem
@@ -178,7 +260,8 @@ def send_via_outlook(to_addrs, cc_addrs, subject, body, attachment_path: Path, s
         mail.CC = "; ".join(cc_addrs)
     mail.Subject = subject
     mail.Body = body
-    mail.Attachments.Add(str(attachment_path))
+    for p in paths:
+        mail.Attachments.Add(str(p.resolve()))
 
     if send_immediately:
         mail.Send()
@@ -228,10 +311,21 @@ def send_email(to_addrs, cc_addrs, subject, body, attachment_path: Path, smtp_co
 
     all_recipients = to_addrs + cc_addrs
     context = ssl.create_default_context()
-    with smtplib.SMTP(host, port) as server:
-        server.starttls(context=context)
-        server.login(user, password)
-        server.send_message(msg, from_addr=sender, to_addrs=all_recipients)
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as server:
+            server.starttls(context=context)
+            server.login(user, password)
+            server.send_message(msg, from_addr=sender, to_addrs=all_recipients)
+    except (TimeoutError, OSError) as e:
+        raise ConnectionError(
+            f"Could not reach {host}:{port} within 15 seconds ({e}). "
+            "This almost always means either (a) a firewall/network is blocking outbound SMTP "
+            "from this machine, or (b) for Office 365, SMTP AUTH is disabled on this mailbox by "
+            "default and needs an admin to enable it (Microsoft 365 admin center -> this user -> "
+            "Mail -> Manage email apps -> enable 'Authenticated SMTP'). "
+            "If you already have Outlook desktop working, switching to the Outlook sending method "
+            "avoids this entirely."
+        ) from e
 
     print(f"Sent: {subject}  ->  {len(all_recipients)} recipients")
 

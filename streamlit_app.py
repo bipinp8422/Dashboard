@@ -85,58 +85,52 @@ uploaded = st.file_uploader(
 # ---------------------------------------------------------------------------
 def sending_settings_panel():
     st.sidebar.header("✉️ Email sending settings")
+    st.sidebar.caption("Using Outlook desktop by default -- no password needed, since it uses the Outlook app already signed in on this machine.")
 
-    method = st.sidebar.radio(
-        "How should emails be sent?",
-        ["Outlook desktop (recommended, no password needed)", "SMTP (advanced, needs mail server credentials)"],
-        index=0,
-        key="send_method",
+    send_immediately = st.sidebar.checkbox(
+        "Send immediately (skip review)",
+        value=False,
+        help="Off (default): opens each email as a normal Outlook draft, attachment already added, so you can look it over and click Send yourself. On: sends right away with no draft window.",
+        key="outlook_send_immediately",
     )
 
-    if method.startswith("Outlook"):
-        st.sidebar.caption(
-            "Uses the Outlook desktop app already signed in on this Windows machine -- "
-            "no password entry needed here at all."
+    smtp_cfg = {"host": None, "port": None, "user": None, "password": None, "sender": None}
+    use_smtp = False
+    with st.sidebar.expander("Advanced: use SMTP instead of Outlook"):
+        st.caption(
+            "Only needed if you don't have Outlook desktop, or specifically want to send via a "
+            "mail server instead. Kept in memory for this session only -- never written to disk."
         )
-        send_immediately = st.sidebar.checkbox(
-            "Send immediately (skip review)",
-            value=False,
-            help="Off (default): opens each email as a normal Outlook draft, attachment already added, so you can look it over and click Send yourself. On: sends right away with no draft window.",
-        )
-        return {"method": "outlook", "send_immediately": send_immediately}
+        use_smtp = st.checkbox("Use SMTP instead of Outlook for sending", value=False, key="use_smtp_toggle")
+        host = st.text_input("SMTP host", value=st.session_state.get("smtp_host", ""), placeholder="smtp.office365.com").strip()
+        port = st.text_input("SMTP port", value=st.session_state.get("smtp_port", "587")).strip()
+        user = st.text_input("SMTP username (your email)", value=st.session_state.get("smtp_user", ""), placeholder="you@canon.co.in").strip()
+        password = st.text_input("SMTP password (or app password)", value=st.session_state.get("smtp_password", ""), type="password").strip()
+        sender = st.text_input("From address (optional, defaults to username)", value=st.session_state.get("smtp_sender", "")).strip()
 
-    st.sidebar.caption(
-        "Needed only if you want to use '✅ Send Now' with this method. Kept in memory for "
-        "this browser session only -- never written to disk or shared."
-    )
-    host = st.sidebar.text_input("SMTP host", value=st.session_state.get("smtp_host", ""), placeholder="smtp.office365.com")
-    port = st.sidebar.text_input("SMTP port", value=st.session_state.get("smtp_port", "587"))
-    user = st.sidebar.text_input("SMTP username (your email)", value=st.session_state.get("smtp_user", ""), placeholder="you@canon.co.in")
-    password = st.sidebar.text_input("SMTP password (or app password)", value=st.session_state.get("smtp_password", ""), type="password")
-    sender = st.sidebar.text_input("From address (optional, defaults to username)", value=st.session_state.get("smtp_sender", ""))
+        st.session_state["smtp_host"] = host
+        st.session_state["smtp_port"] = port
+        st.session_state["smtp_user"] = user
+        st.session_state["smtp_password"] = password
+        st.session_state["smtp_sender"] = sender
 
-    st.session_state["smtp_host"] = host
-    st.session_state["smtp_port"] = port
-    st.session_state["smtp_user"] = user
-    st.session_state["smtp_password"] = password
-    st.session_state["smtp_sender"] = sender
-
-    configured = bool(host and user and password)
-    if configured:
-        st.sidebar.success("SMTP settings entered -- 'Send Now' is ready to use.")
-    else:
-        st.sidebar.info("Fill these in to enable 'Send Now'. Until then you can still preview and download.")
-
-    return {
-        "method": "smtp",
-        "smtp_config": {
+        smtp_cfg = {
             "host": host or None,
             "port": port or None,
             "user": user or None,
             "password": password or None,
             "sender": sender or None,
-        },
-    }
+        }
+        if use_smtp:
+            configured = bool(host and user and password)
+            if configured:
+                st.success("SMTP settings entered -- will be used instead of Outlook.")
+            else:
+                st.warning("Fill in host, username, and password to actually send via SMTP.")
+
+    if use_smtp:
+        return {"method": "smtp", "smtp_config": smtp_cfg}
+    return {"method": "outlook", "send_immediately": send_immediately}
 
 
 def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:

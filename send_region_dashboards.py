@@ -66,11 +66,14 @@ import mimetypes
 import os
 import smtplib
 import ssl
+import subprocess
 import sys
+import tempfile
 from email.message import EmailMessage
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook as load_xlsx_workbook
 
 from make_dashboard import load_workbook, build_dataset, render_html, filter_by_region
 
@@ -146,59 +149,85 @@ def render_region_only_dashboard(raw, tgt, region: str, source_name: str) -> tup
     return html, meta
 
 
-def _detect_header_row_and_region_col(df_raw: pd.DataFrame, max_scan: int = 6):
-    """Scan the first few rows of a raw (header=None) sheet for the row that
-    contains a cell literally reading "Region" -- that's the real header row
-    for sheets like these, which often have title/threshold rows above it.
-    Returns (header_row_index, region_column_index), or (None, None) if no
-    such row is found in the first `max_scan` rows.
+def _detect_header_row_and_region_col_ws(ws, max_scan: int = 6):
+    """Scan the first few rows of an openpyxl worksheet for the cell that
+    literally reads "Region" -- that's the real header row for sheets like
+    these, which often have title/threshold rows above it. Returns
+    (header_row_index, region_column_index), both 1-based, or (None, None)
+    if no such cell is found in the first `max_scan` rows.
     """
-    for r in range(min(max_scan, len(df_raw))):
-        row_vals = df_raw.iloc[r].tolist()
-        for c, v in enumerate(row_vals):
+    for r in range(1, max_scan + 1):
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row=r, column=c).value
             if isinstance(v, str) and v.strip().lower() == "region":
                 return r, c
     return None, None
 
 
-def filter_sheet_by_region(df_raw: pd.DataFrame, region: str) -> pd.DataFrame:
-    """Filter a raw (header=None) sheet down to rows matching `region`.
-
-    Any rows above the detected header (titles, threshold rows, etc.) are
-    kept as-is; the header row itself is always kept; every data row below
-    it is kept only if its Region-column value matches `region`
-    (case-insensitive, whitespace-trimmed). If no "Region" column can be
-    found in the first few rows, the sheet is returned unchanged rather than
-    guessed at -- safer to leave a sheet un-filtered than to silently drop
-    rows using the wrong column.
+def _convert_to_xlsx_if_needed(source_path: Path) -> Path:
+    """openpyxl can only read/write .xlsx/.xlsm, not the binary .xlsb
+    format. If the source is .xlsb, convert it to .xlsx with LibreOffice
+    first -- a real spreadsheet-engine conversion, so every sheet's fonts,
+    fills, column widths, merged cells, and number formats come through
+    unchanged. Returns the source path itself if no conversion is needed.
     """
-    header_row, region_col = _detect_header_row_and_region_col(df_raw)
-    if header_row is None:
-        return df_raw
+    if source_path.suffix.lower() in (".xlsx", ".xlsm"):
+        return source_path
 
-    data = df_raw.iloc[header_row + 1:]
-    mask = data[region_col].astype(str).str.strip().str.lower() == region.strip().lower()
-    filtered_data = data[mask]
-    return pd.concat([df_raw.iloc[:header_row + 1], filtered_data], ignore_index=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="xlsb_convert_"))
+    result = subprocess.run(
+        ["soffice", "--headless", "--convert-to", "xlsx", "--outdir", str(tmp_dir), str(source_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    converted = tmp_dir / (source_path.stem + ".xlsx")
+    if result.returncode != 0 or not converted.exists():
+        raise RuntimeError(
+            f"LibreOffice conversion of {source_path.name} to .xlsx failed: "
+            f"{result.stderr or result.stdout}"
+        )
+    return converted
 
 
 def build_region_source_workbook(source_path: Path, region: str, out_path: Path) -> Path:
-    """Read every sheet from the ORIGINAL source workbook (.xlsm, .xlsx, or
-    .xlsb -- .xlsb requires the 'pyxlsb' package) and write a new .xlsx
-    workbook with the same sheet names, each filtered down to just
-    `region`'s rows using filter_sheet_by_region. This is the "respective
-    region data" attachment -- a full region-filtered copy of the source
-    workbook, distinct from the HTML dashboard.
+    """Build the region-filtered attachment by editing a real copy of the
+    ORIGINAL source workbook -- same sheet names, same fonts/fills/column
+    widths/merged header cells/number formats -- instead of rebuilding it
+    cell-by-cell from raw pandas values (which threw all formatting away).
+
+    For each sheet, the header row + Region column are auto-detected (same
+    logic as before), and every data row whose Region value doesn't match
+    `region` is deleted outright (bottom-to-top, so row indices stay valid).
+    Sheets with no detectable "Region" column are left completely untouched
+    rather than guessed at.
+
+    Handles .xlsb sources transparently by converting to .xlsx via
+    LibreOffice first (openpyxl can't read/write .xlsb directly).
     """
     source_path = Path(source_path)
     out_path = Path(out_path)
-    xls = pd.ExcelFile(source_path)
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        for sheet_name in xls.sheet_names:
-            df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-            filtered = filter_sheet_by_region(df_raw, region)
-            # Excel sheet names are capped at 31 characters.
-            filtered.to_excel(writer, sheet_name=sheet_name[:31], header=False, index=False)
+
+    xlsx_source = _convert_to_xlsx_if_needed(source_path)
+    wb = load_xlsx_workbook(xlsx_source)
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        header_row, region_col = _detect_header_row_and_region_col_ws(ws)
+        if header_row is None:
+            continue
+
+        target = region.strip().lower()
+        for r in range(ws.max_row, header_row, -1):
+            val = ws.cell(row=r, column=region_col).value
+            val_str = str(val).strip().lower() if val is not None else ""
+            # Only drop rows that explicitly belong to a DIFFERENT region.
+            # Blank-region rows (Total/subtotal rows, spacer rows) are left
+            # alone -- they're not data for the other region, so removing
+            # them would just be silently deleting part of the original
+            # sheet's own structure (e.g. a summary sheet's "Total" row).
+            if val_str and val_str != target:
+                ws.delete_rows(r, 1)
+
+    wb.save(out_path)
     return out_path
 
 

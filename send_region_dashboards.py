@@ -200,6 +200,93 @@ def _convert_to_xlsx_if_needed(source_path: Path) -> Path:
     return converted
 
 
+# ---------------------------------------------------------------------------
+# Formula -> value flattening ("Paste Special -> Values" over the whole
+# workbook). Source reports sometimes have formula-driven columns (e.g. a
+# computed Revenue or "Helping Column" in Raw Data). Two problems with
+# leaving those formulas in the attachment:
+#   1. openpyxl never evaluates formulas, so a cell can come through with no
+#      cached value at all -- just the formula string, showing as 0/blank
+#      until someone opens it in Excel.
+#   2. openpyxl also doesn't rewrite formula references when rows are
+#      deleted, so after region-filtering, a formula like "=W2" can end up
+#      pointing at a completely different row's data than it originally did.
+# Baking every formula down to its plain computed value BEFORE any rows are
+# deleted sidesteps both issues, and matches a manual "Paste Special ->
+# Values" -- formatting (fonts, fills, number formats, column widths) is
+# completely unaffected, only the underlying cell content changes.
+# ---------------------------------------------------------------------------
+
+_RECALC_MACRO_LINUX = Path("~/.config/libreoffice/4/user/basic/Standard/Module1.xba").expanduser()
+_RECALC_MACRO_MACOS = Path("~/Library/Application Support/LibreOffice/4/user/basic/Standard/Module1.xba").expanduser()
+_RECALC_MACRO_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">
+    Sub RecalculateAndSave()
+      ThisComponent.calculateAll()
+      ThisComponent.store()
+      ThisComponent.close(True)
+    End Sub
+</script:module>"""
+
+
+def _ensure_recalc_macro_installed():
+    """One-time setup: drop a tiny LibreOffice Basic macro into the user's
+    LibreOffice profile that recalculates every formula in a workbook and
+    saves it in place. No-op if it's already there."""
+    import platform
+    macro_path = _RECALC_MACRO_MACOS if platform.system() == "Darwin" else _RECALC_MACRO_LINUX
+    if macro_path.exists() and "RecalculateAndSave" in macro_path.read_text():
+        return
+    macro_path.parent.mkdir(parents=True, exist_ok=True)
+    if not macro_path.parent.parent.exists():
+        # Profile doesn't exist yet -- a throwaway headless launch creates it.
+        subprocess.run(["soffice", "--headless", "--terminate_after_init"], capture_output=True, timeout=20)
+        macro_path.parent.mkdir(parents=True, exist_ok=True)
+    macro_path.write_text(_RECALC_MACRO_XML)
+
+
+def _recalculate_xlsx_in_place(xlsx_path: Path, timeout: int = 60):
+    """Force LibreOffice to recalculate every formula in xlsx_path and save
+    the refreshed cached values back into that same file."""
+    _ensure_recalc_macro_installed()
+    subprocess.run(
+        [
+            "soffice", "--headless", "--norestore",
+            "vnd.sun.star.script:Standard.Module1.RecalculateAndSave?language=Basic&location=application",
+            str(xlsx_path.resolve()),
+        ],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _flatten_formulas_to_values(xlsx_path: Path) -> Path:
+    """Return the path to a private temp copy of xlsx_path where every
+    formula cell has been replaced by its computed value -- everything
+    else (styles, column widths, merges) is untouched. The original file
+    is never modified."""
+    work_copy = Path(tempfile.mkstemp(suffix=".xlsx")[1])
+    import shutil
+    shutil.copyfile(xlsx_path, work_copy)
+
+    _recalculate_xlsx_in_place(work_copy)
+
+    wb_formulas = load_xlsx_workbook(work_copy, data_only=False)
+    wb_values = load_xlsx_workbook(work_copy, data_only=True)
+
+    for sheet_name in wb_formulas.sheetnames:
+        ws_f = wb_formulas[sheet_name]
+        ws_v = wb_values[sheet_name]
+        for row in ws_f.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = ws_v[cell.coordinate].value
+
+    flattened_path = Path(tempfile.mkstemp(suffix=".xlsx")[1])
+    wb_formulas.save(flattened_path)
+    return flattened_path
+
+
 def build_region_source_workbook(source_path: Path, region: str, out_path: Path) -> Path:
     """Build the region-filtered attachment by editing a real copy of the
     ORIGINAL source workbook -- same sheet names, same fonts/fills/column
@@ -210,6 +297,11 @@ def build_region_source_workbook(source_path: Path, region: str, out_path: Path)
     sheet present in the source workbook is dropped entirely:
         Achievement_Summary, Car Counter Count, Alpha Champs,
         Target vs Achievement, Alpha Program Sell-Out, Raw Data
+
+    Every formula in the workbook is recalculated and baked down to its
+    plain computed value first (see _flatten_formulas_to_values) -- this is
+    what makes the row deletion below safe, since a formula's reference
+    could otherwise end up pointing at the wrong row once rows are removed.
 
     For each kept sheet, the header row + Region column are auto-detected
     (same logic as before), and every data row whose Region value doesn't
@@ -224,7 +316,8 @@ def build_region_source_workbook(source_path: Path, region: str, out_path: Path)
     out_path = Path(out_path)
 
     xlsx_source = _convert_to_xlsx_if_needed(source_path)
-    wb = load_xlsx_workbook(xlsx_source)
+    values_only_source = _flatten_formulas_to_values(xlsx_source)
+    wb = load_xlsx_workbook(values_only_source)
 
     # Drop any sheet not on the allowed list.
     for sheet_name in list(wb.sheetnames):

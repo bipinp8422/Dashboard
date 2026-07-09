@@ -54,6 +54,7 @@ from send_region_dashboards import (
     region_email_content,
     send_email,
     send_via_outlook,
+    build_region_source_workbook,
     NORTH_TO,
     NORTH_CC,
     SOUTH_TO,
@@ -74,9 +75,9 @@ st.caption(
 )
 
 uploaded = st.file_uploader(
-    "Upload the .xlsm report",
-    type=["xlsm"],
-    help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports.",
+    "Upload the report (.xlsm, .xlsb, or .xlsx)",
+    type=["xlsm", "xlsb", "xlsx"],
+    help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports. .xlsb files need the 'pyxlsb' package installed (pip install pyxlsb).",
 )
 
 
@@ -148,7 +149,7 @@ def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
     return f"mailto:{to}?{query}"
 
 
-def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, send_settings: dict):
+def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, send_settings: dict, original_upload_path: Path):
     to_addrs, cc_addrs, subject, body = region_email_content(region, month_label)
 
     st.markdown(f"#### ✉️ Email preview -- {region}")
@@ -157,8 +158,12 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     st.text_input(f"Subject ({region})", value=subject, disabled=True, key=f"subj_{region}")
     st.text_area(f"Body ({region})", value=body, height=220, disabled=True, key=f"body_{region}")
 
-    attachment_name = f"{Path(source_name).stem}_{region.upper()}.html"
-    st.caption(f"📎 Attachment: {attachment_name} (included automatically when you send)")
+    html_attachment_name = f"{Path(source_name).stem}_{region.upper()}.html"
+    xlsx_attachment_name = f"{Path(source_name).stem}_{region.upper()}.xlsx"
+    st.caption(
+        f"📎 Attachments: {html_attachment_name} (dashboard) + {xlsx_attachment_name} "
+        f"(region-filtered source data, all sheets) -- both included automatically when you send"
+    )
 
     with st.expander(f"Preview attached dashboard ({region} view)"):
         if hasattr(st, "iframe"):
@@ -167,17 +172,30 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             import streamlit.components.v1 as components
             components.html(region_html, height=1000, scrolling=True)
 
+    # Build the region-filtered Excel workbook now so it's ready for both the
+    # download button and the send buttons below -- built once per render,
+    # cached in session_state keyed by region so re-renders don't rebuild it
+    # unnecessarily while the user is just looking at the preview.
+    xlsx_cache_key = f"region_xlsx_bytes_{region}"
+    if xlsx_cache_key not in st.session_state:
+        with st.spinner(f"Building {region} region data workbook..."):
+            tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
+            build_region_source_workbook(original_upload_path, region, tmp_xlsx)
+            st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
+            tmp_xlsx.unlink(missing_ok=True)
+    region_xlsx_bytes = st.session_state[xlsx_cache_key]
+
     method = send_settings["method"]
     if method == "outlook":
         configured = True  # no credentials needed, just needs Outlook installed
-        button_label = "✅ Send Now via Outlook (attachment included automatically)" if send_settings["send_immediately"] \
-            else "✅ Open in Outlook (attachment included, review before sending)"
+        button_label = "✅ Send Now via Outlook (both attachments included automatically)" if send_settings["send_immediately"] \
+            else "✅ Open in Outlook (both attachments included, review before sending)"
     else:
         cfg = send_settings["smtp_config"]
         configured = bool(cfg["host"] and cfg["user"] and cfg["password"])
-        button_label = "✅ Send Now (attachment included automatically)"
+        button_label = "✅ Send Now (both attachments included automatically)"
 
-    sc1, sc2 = st.columns(2)
+    sc1, sc2, sc3 = st.columns(3)
     with sc1:
         send_clicked = st.button(
             button_label,
@@ -188,12 +206,21 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
         )
     with sc2:
         st.download_button(
-            "⬇️ Download attachment (optional, e.g. to keep a copy)",
+            "⬇️ Download dashboard (.html)",
             data=region_html,
-            file_name=attachment_name,
+            file_name=html_attachment_name,
             mime="text/html",
             use_container_width=True,
-            key=f"dl_{region}",
+            key=f"dl_html_{region}",
+        )
+    with sc3:
+        st.download_button(
+            "⬇️ Download region data (.xlsx)",
+            data=region_xlsx_bytes,
+            file_name=xlsx_attachment_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"dl_xlsx_{region}",
         )
 
     if not configured:
@@ -205,23 +232,28 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             try:
                 with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
                     tmp.write(region_html.encode("utf-8"))
-                    tmp_path = Path(tmp.name)
-                # Give the temp file the same display name as the real attachment.
-                real_attachment = tmp_path.with_name(attachment_name)
-                tmp_path.replace(real_attachment)
+                    tmp_html_path = Path(tmp.name)
+                # Give the temp files the same display names as the real attachments.
+                real_html = tmp_html_path.with_name(html_attachment_name)
+                tmp_html_path.replace(real_html)
+
+                real_xlsx = real_html.with_name(xlsx_attachment_name)
+                real_xlsx.write_bytes(region_xlsx_bytes)
+
+                attachments = [real_html, real_xlsx]
 
                 if method == "outlook":
                     send_via_outlook(
-                        to_addrs, cc_addrs, subject, body, real_attachment,
+                        to_addrs, cc_addrs, subject, body, attachments,
                         send_immediately=send_settings["send_immediately"],
                     )
                     if send_settings["send_immediately"]:
-                        st.success(f"Sent! {region} dashboard emailed via Outlook to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
+                        st.success(f"Sent! {region} dashboard + region data emailed via Outlook to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, both attachments included.")
                     else:
-                        st.success("Opened in Outlook -- attachment already added. Review it and click Send whenever you're ready.")
+                        st.success("Opened in Outlook -- both attachments already added. Review it and click Send whenever you're ready.")
                 else:
-                    send_email(to_addrs, cc_addrs, subject, body, real_attachment, smtp_config=send_settings["smtp_config"])
-                    st.success(f"Sent! {region} dashboard emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, attachment included.")
+                    send_email(to_addrs, cc_addrs, subject, body, attachments, smtp_config=send_settings["smtp_config"])
+                    st.success(f"Sent! {region} dashboard + region data emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, both attachments included.")
             except Exception as e:
                 st.error(f"Couldn't send the {region} email: {e}")
 
@@ -238,15 +270,16 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
             )
         st.caption(
             "Browsers block mailto: links from auto-attaching files (a security restriction, "
-            "not something this app can get around), so you'd need to download the attachment "
-            "above and attach it yourself in that draft. 'Send Now' above skips all of that."
+            "not something this app can get around), so you'd need to download both attachments "
+            "above and attach them yourself in that draft. 'Send Now' above skips all of that."
         )
 
 
 send_settings = sending_settings_panel()
 
 if uploaded is not None:
-    with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmp:
+    upload_suffix = Path(uploaded.name).suffix or ".xlsm"
+    with tempfile.NamedTemporaryFile(suffix=upload_suffix, delete=False) as tmp:
         tmp.write(uploaded.getbuffer())
         tmp_path = Path(tmp.name)
 
@@ -301,11 +334,11 @@ if uploaded is not None:
 
     if st.session_state.show_preview["North"]:
         north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
-        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings)
+        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings, tmp_path)
 
     if st.session_state.show_preview["South"]:
         south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
-        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings)
+        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings, tmp_path)
 
     st.divider()
     st.subheader("Full dashboard (All regions)")

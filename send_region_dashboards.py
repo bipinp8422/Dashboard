@@ -64,6 +64,7 @@ imported directly for the data-processing and HTML-rendering functions.
 import argparse
 import mimetypes
 import os
+import shutil
 import smtplib
 import ssl
 import subprocess
@@ -176,6 +177,30 @@ def _detect_header_row_and_region_col_ws(ws, max_scan: int = 6):
     return None, None
 
 
+def _require_soffice():
+    """Raise a clear, actionable error if LibreOffice isn't installed on
+    this machine, instead of letting subprocess.run blow up with a bare
+    FileNotFoundError. Needed for .xlsb conversion and for baking formulas
+    down to values -- both features depend on LibreOffice being present.
+
+    On Streamlit Community Cloud specifically: add a file named
+    packages.txt (next to requirements.txt, in the repo root) containing
+    just the line "libreoffice" -- Streamlit Cloud runs apt-get on
+    anything listed there before starting the app.
+    """
+    if shutil.which("soffice") is None:
+        raise RuntimeError(
+            "LibreOffice ('soffice') isn't installed on this machine, but it's required "
+            "to handle .xlsb files and to bake formulas down to plain values. "
+            "If you're running this on Streamlit Community Cloud: add a file named "
+            "packages.txt to the repo (same folder as requirements.txt) containing just "
+            "the line 'libreoffice', then redeploy -- Streamlit Cloud will install it "
+            "automatically. On your own machine/server: install LibreOffice normally "
+            "(e.g. 'apt-get install libreoffice' on Linux, or download it from "
+            "libreoffice.org on Windows/Mac)."
+        )
+
+
 def _convert_to_xlsx_if_needed(source_path: Path) -> Path:
     """openpyxl can only read/write .xlsx/.xlsm, not the binary .xlsb
     format. If the source is .xlsb, convert it to .xlsx with LibreOffice
@@ -186,6 +211,7 @@ def _convert_to_xlsx_if_needed(source_path: Path) -> Path:
     if source_path.suffix.lower() in (".xlsx", ".xlsm"):
         return source_path
 
+    _require_soffice()
     tmp_dir = Path(tempfile.mkdtemp(prefix="xlsb_convert_"))
     result = subprocess.run(
         ["soffice", "--headless", "--convert-to", "xlsx", "--outdir", str(tmp_dir), str(source_path)],
@@ -249,6 +275,7 @@ def _ensure_recalc_macro_installed():
 def _recalculate_xlsx_in_place(xlsx_path: Path, timeout: int = 60):
     """Force LibreOffice to recalculate every formula in xlsx_path and save
     the refreshed cached values back into that same file."""
+    _require_soffice()
     _ensure_recalc_macro_installed()
     subprocess.run(
         [

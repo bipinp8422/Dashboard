@@ -195,11 +195,8 @@ def show_email_preview(region: str, region_html: str, month_label: str, source_n
     )
 
     with st.expander(f"Preview attached dashboard ({region} view)"):
-        if hasattr(st, "iframe"):
-            st.iframe(region_html, height=1000)
-        else:
-            import streamlit.components.v1 as components
-            components.html(region_html, height=1000, scrolling=True)
+        import streamlit.components.v1 as components
+        components.html(region_html, height=1000, scrolling=True)
 
     # Build the region-filtered Excel workbook now so it's ready for both the
     # download button and the send buttons below -- built once per render,
@@ -371,15 +368,14 @@ if uploaded is not None:
 
     st.divider()
     st.subheader("Full dashboard (All regions)")
-    if hasattr(st, "iframe"):
-        # Streamlit >= 1.56: newer, non-deprecated API. Accepts a raw HTML
-        # string directly. A fixed height is used since the page container
-        # itself has no defined height for "stretch" to fill against.
-        st.iframe(html, height=3000)
-    else:
-        # Older Streamlit versions don't have st.iframe yet.
-        import streamlit.components.v1 as components
-        components.html(html, height=3000, scrolling=True)
+    # NOTE: st.iframe()'s "auto-detect raw HTML vs URL vs file path" logic
+    # (only present in newer Streamlit versions) is unreliable for a
+    # multi-megabyte HTML string like this dashboard -- it can fall back to
+    # rendering the source as plain text instead of an iframe. components.html
+    # from streamlit.components.v1 is the long-standing, version-independent
+    # way to embed a full HTML/JS page and always puts it in a real iframe.
+    import streamlit.components.v1 as components
+    components.html(html, height=3000, scrolling=True)
 
 else:
     st.info("Waiting for a file upload to get started.")

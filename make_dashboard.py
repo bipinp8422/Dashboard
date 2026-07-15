@@ -167,8 +167,8 @@ def build_dataset(raw: pd.DataFrame, tgt: pd.DataFrame):
     # Sourced straight from the two Raw Data columns "Alpha & Booster InK/Laser"
     # (values: "-", "Ink", "Laser") and "Alpha / Booster" (values: "-", "Alpha",
     # "X-Factor"). Rows not tagged into the program carry "-" in both columns.
-    AB_TYPE_COL = "Alpha & Booster InK/Laser"
-    AB_PROG_COL = "Alpha / Booster"
+    AB_TYPE_COL = "Alpha & X Factor InK/Laser"
+    AB_PROG_COL = "Alpha / X Factor"
     total_all_revenue = float(raw["Revenue"].sum())
 
     if AB_TYPE_COL in raw.columns and AB_PROG_COL in raw.columns:

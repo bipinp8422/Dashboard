@@ -41,6 +41,16 @@ region's dashboard automatically -- no separate download-and-attach step.
 Equivalent from a terminal, without opening Streamlit at all:
     python send_region_dashboards.py <file.xlsm> --send --via outlook
     python send_region_dashboards.py <file.xlsm> --send   (SMTP, needs SMTP_* env vars)
+
+NOTE ON DATA SCHEMA
+--------------------
+make_dashboard.py's build_dataset() returns row-level (`data["rows"]`) and
+rep-level (`data["reps"]`) records instead of pre-computed summary keys like
+the old `data["kpi"]`, so all four filters (Region / BM / Ink-Laser /
+Alpha-X-Factor / Product Division) can be combined live in the browser. Any
+summary numbers this app needs (target, achieved, attainment %, etc.) are
+computed here directly from `data["reps"]` / `data["rows"]` instead of
+reading a `data["kpi"]` key that no longer exists.
 """
 
 import tempfile
@@ -79,6 +89,25 @@ uploaded = st.file_uploader(
     type=["xlsm", "xlsb", "xlsx"],
     help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports. .xlsb files need the 'pyxlsb' package installed (pip install pyxlsb).",
 )
+
+
+def summarize_kpis(data: dict) -> dict:
+    """Compute the same headline numbers the old `data["kpi"]` block used to
+    provide, from the current rows/reps schema. Keeps every call site below
+    reading a stable, small dict instead of re-deriving these inline."""
+    reps = data["reps"]
+    rows = data["rows"]
+    total_target = sum(r["Target"] for r in reps)
+    total_achieved = sum(r["Achieved"] for r in reps)
+    ach_pct = (total_achieved / total_target * 100) if total_target else 0
+    return {
+        "totalTarget": total_target,
+        "totalAchieved": total_achieved,
+        "achPct": ach_pct,
+        "totalReps": len(reps),
+        "repsAbove100": sum(1 for r in reps if r["AchPct"] >= 1),
+        "totalTransactions": len(rows),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +313,7 @@ if uploaded is not None:
         tmp_path = Path(tmp.name)
 
     try:
-        with st.spinner("Reading workbook and crunching daily / regional / rep-level breakdowns..."):
+        with st.spinner("Reading workbook and crunching daily / regional / BM / Ink-Laser / Alpha-X-Factor breakdowns..."):
             raw, tgt = load_workbook(tmp_path)
             data, meta = build_dataset(raw, tgt)
             meta["source_file"] = uploaded.name
@@ -297,7 +326,7 @@ if uploaded is not None:
         )
         st.stop()
 
-    kpi = data["kpi"]
+    kpi = summarize_kpis(data)
     st.success(f"Dashboard built for **{meta['month_label']}** ({meta['days_active']} of {meta['days_in_month']} days active).")
 
     c1, c2, c3, c4 = st.columns(4)

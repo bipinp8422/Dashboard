@@ -1,356 +1,673 @@
+#!/usr/bin/env python3
 """
-Streamlit front-end for the Denave x Canon CPP dashboard generator.
+Patches make_dashboard.py in place with:
+  1. Fixed Alpha/X-Factor column names (matches your actual Raw Data headers).
+  2. BM breakdown data (bm_df, per-BM category/dow/top10/bottom10, dailyBM).
+  3. New keys added to the data dict.
+  4. A <div id="bmFilters"> tab row added to BODY_HTML.
+  5. APP_JS fully replaced with the BM-aware version.
 
-Lets you upload a Sales_Representative_Target_vs_Achievement_Report_Denave_<Month>.xlsm
-file in a browser, builds the same HTML dashboard as make_dashboard.py, shows it
-inline, and gives you a button to download the standalone HTML file.
-
-It also lets you PREVIEW the North / South region emails (subject, recipients,
-body, and the exact dashboard that would be attached), and then actually SEND
-that email -- with the dashboard attached automatically -- via the "✅ Send Now"
-button. Nothing is ever sent until you click that button.
-
-RUN IT
-------
-    pip install streamlit pandas openpyxl
-    pip install pywin32          # only needed for the Outlook-sending option (Windows)
-    streamlit run streamlit_app.py
-
-Make sure make_dashboard.py and send_region_dashboards.py sit in the SAME
-folder as this file -- this app imports functions directly from both instead
-of duplicating them.
-
-SENDING EMAIL
---------------
-Two ways to send, chosen in the "Email sending settings" panel in the sidebar:
-
-  - Outlook desktop (default, recommended if you're on Windows with Outlook
-    installed): no password needed at all, since it drives the Outlook app
-    you're already signed into. Choose whether to open each email as a
-    normal Outlook draft (attachment already added, review then click Send
-    yourself) or send it immediately with no window.
-
-  - SMTP (advanced): needs real mail server credentials (host, port,
-    username, password -- typically an app password, not your normal
-    account password). Kept only in memory for this Streamlit session and
-    never written to disk.
-
-Either way, clicking the button on a region's preview attaches that
-region's dashboard automatically -- no separate download-and-attach step.
-
-Equivalent from a terminal, without opening Streamlit at all:
-    python send_region_dashboards.py <file.xlsm> --send --via outlook
-    python send_region_dashboards.py <file.xlsm> --send   (SMTP, needs SMTP_* env vars)
+Usage:
+    python patch_dashboard.py make_dashboard.py
+    (writes make_dashboard.py, keeping a make_dashboard.py.bak backup)
 """
-
-import tempfile
+import re
+import sys
+import shutil
 from pathlib import Path
 
-import streamlit as st
+NEW_APP_JS = r'''
+Chart.defaults.font.family = "'Inter',sans-serif";
+Chart.defaults.color = '#8592AE';
+Chart.defaults.borderColor = 'rgba(255,255,255,.06)';
 
-from make_dashboard import load_workbook, build_dataset, render_html
-from send_region_dashboards import (
-    render_region_only_dashboard,
-    region_email_content,
-    send_email,
-    send_via_outlook,
-    build_region_source_workbook,
-    NORTH_TO,
-    NORTH_CC,
-    SOUTH_TO,
-    SOUTH_CC,
-)
+const fmtCr = n => '\u20b9' + (n/10000000).toFixed(2) + ' Cr';
+const fmtL = n => '\u20b9' + (n/100000).toFixed(1) + ' L';
+const fmtShort = n => n>=10000000 ? '\u20b9'+(n/10000000).toFixed(1)+'Cr' : n>=100000 ? '\u20b9'+(n/100000).toFixed(1)+'L' : '\u20b9'+Math.round(n).toLocaleString('en-IN');
+const fmtNum = n => Math.round(n).toLocaleString('en-IN');
+const fmtDate = s => { const d=new Date(s+'T00:00:00'); return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',weekday:'short'}); };
+const fmtDateShort = s => { const d=new Date(s+'T00:00:00'); return d.getDate(); };
 
-st.set_page_config(
-    page_title="Denave x Canon CPP -- Dashboard Generator",
-    page_icon="📊",
-    layout="wide",
-)
+let currentRegion = 'All';
+let currentBM = 'All';
+let selectedDate = DATA.daily[DATA.daily.length-1].DateStr;
+const charts = {};
 
-st.title("📊 Denave x Canon CPP -- Daily Performance Dashboard Generator")
-st.caption(
-    "Upload the monthly Sales_Representative_Target_vs_Achievement_Report_Denave_*.xlsm "
-    "export and get the full interactive dashboard -- Day Explorer, daily trend, pacing "
-    "chart, category mix, region tabs, and leaderboards -- built automatically."
-)
+function scopeType(){ return currentBM !== 'All' ? 'bm' : 'region'; }
+function scopeValue(){ return currentBM !== 'All' ? currentBM : currentRegion; }
+function scopeLabel(){ return currentBM !== 'All' ? currentBM : (currentRegion==='All' ? 'All Regions' : currentRegion); }
 
-uploaded = st.file_uploader(
-    "Upload the report (.xlsm, .xlsb, or .xlsx)",
-    type=["xlsm", "xlsb", "xlsx"],
-    help="Must contain a 'Raw Data' sheet and a 'Target vs Achievement' sheet, same as the source reports. .xlsb files need the 'pyxlsb' package installed (pip install pyxlsb).",
-)
+function destroy(id){ if(charts[id]){ charts[id].destroy(); } }
+
+function renderBmFilters(){
+  const el = document.getElementById('bmFilters');
+  if(!el || !DATA.bmList || !DATA.bmList.length) return;
+  el.innerHTML = ['All'].concat(DATA.bmList).map(b=>
+    `<button class="tab ${currentBM===b?'active':''}" data-bm="${b}">${b==='All' ? 'All BMs' : b}</button>`
+  ).join('');
+  el.querySelectorAll('.tab').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      currentBM = btn.dataset.bm;
+      if(currentBM !== 'All'){
+        currentRegion = 'All';
+        document.querySelectorAll('#regionFilters .tab').forEach(b=>b.classList.remove('active'));
+        document.querySelector('#regionFilters .tab[data-region="All"]')?.classList.add('active');
+      }
+      renderBmFilters();
+      renderAll();
+    });
+  });
+}
+
+function renderKPIs(){
+  const k = DATA.kpi;
+  let target = k.totalTarget, achieved = k.totalAchieved, reps = k.totalReps, above = k.repsAbove100;
+  if(scopeType()==='region' && currentRegion !== 'All'){
+    const r = DATA.region.find(x=>x.Region===currentRegion);
+    target = r.Target; achieved = r.Achieved; reps = r.Reps;
+  } else if(scopeType()==='bm'){
+    const r = DATA.bm.find(x=>x.BM===currentBM);
+    if(r){ target = r.Target; achieved = r.Achieved; reps = r.Reps; }
+  }
+  const achPct = target ? achieved/target*100 : 0;
+  document.getElementById('statusPill').textContent = 'OVERALL: ' + achPct.toFixed(1) + '% ATTAINED';
+  document.getElementById('repCountLbl').textContent = reps + ' field reps' + (scopeValue()==='All' ? '' : ' \u00b7 ' + scopeLabel());
+
+  const items = [
+    ['Revenue Target', fmtCr(target), null],
+    ['Revenue Achieved', fmtCr(achieved), (achPct>=100?'up':'down')],
+    ['Achievement %', achPct.toFixed(1)+'%', (achPct>=100?'up':'down')],
+    ['Total Transactions', fmtNum(k.totalTransactions), null],
+    ['Units Sold', fmtNum(k.totalUnits), null],
+    ['Reps Above 100%', above + ' / ' + reps, (above/reps>=0.5?'up':'down')],
+  ];
+  document.getElementById('kpiRow').innerHTML = items.map(([l,v,d])=>`
+    <div class="kpi">
+      <div class="lbl">${l}</div>
+      <div class="val">${v}</div>
+      ${d?`<div class="delta ${d}">${d==='up'?'\u25b2 on pace':'\u25bc behind pace'}</div>`:'<div class="delta" style="color:var(--muted-2)">\u2014</div>'}
+    </div>`).join('');
+}
+
+function renderDayStrip(){
+  const rows = DATA.daily;
+  const useVal = d => {
+    if(scopeType()==='bm'){
+      const row = (DATA.dailyBM||[]).find(x=>x.DateStr===d.DateStr) || {};
+      return row[currentBM] || 0;
+    }
+    return currentRegion==='All' ? d.Revenue : (DATA.dailyRegion.find(x=>x.DateStr===d.DateStr)||{})[currentRegion] || 0;
+  };
+  const max = Math.max(...rows.map(useVal));
+  let target = DATA.dailyTargetLine;
+  if(scopeType()==='region' && currentRegion !== 'All'){
+    target = DATA.dailyTargetLine * (DATA.region.find(r=>r.Region===currentRegion).Target/DATA.kpi.totalTarget);
+  } else if(scopeType()==='bm'){
+    const r = DATA.bm.find(x=>x.BM===currentBM);
+    if(r) target = DATA.dailyTargetLine * (r.Target/DATA.kpi.totalTarget);
+  }
+
+  document.getElementById('dayStrip').innerHTML = rows.map(d=>{
+    const v = useVal(d);
+    const h = Math.max(3, (v/max)*100);
+    const cls = d.DateStr===selectedDate ? 'selected' : (v>=target ? 'above':'below');
+    return `<div class="daybar ${cls}" style="height:${h}%" data-date="${d.DateStr}" tabindex="0" title="${fmtDate(d.DateStr)} \u2014 ${fmtShort(v)}"></div>`;
+  }).join('');
+  document.getElementById('dayLabels').innerHTML = rows.map(d=>`<span>${fmtDateShort(d.DateStr)}</span>`).join('');
+
+  document.querySelectorAll('.daybar').forEach(el=>{
+    el.addEventListener('click', ()=>{ selectedDate = el.dataset.date; renderDayStrip(); renderDayDetail(); });
+    el.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ selectedDate = el.dataset.date; renderDayStrip(); renderDayDetail(); }});
+  });
+}
+
+function renderDayDetail(){
+  const dd = DATA.dayDetail[selectedDate];
+  if(!dd) return;
+  const target = DATA.dailyTargetLine;
+  let revForScope = dd.revenue;
+  let vsTarget = null;
+  if(scopeType()==='region' && currentRegion !== 'All'){
+    revForScope = (dd.regionSplit.find(([n])=>n===currentRegion)||[null,0])[1];
+  } else if(scopeType()==='bm'){
+    const row = (DATA.dailyBM||[]).find(x=>x.DateStr===selectedDate) || {};
+    revForScope = row[currentBM] || 0;
+  } else {
+    vsTarget = ((revForScope-target)/target*100);
+  }
+
+  const topReps = dd.topReps;
+  const topCats = dd.topCats.filter(([,v])=>v>0);
+
+  document.getElementById('dayDetail').innerHTML = `
+    <div class="dd-block">
+      <div class="dd-lbl">Selected Day</div>
+      <div class="dd-date">${fmtDate(selectedDate)}</div>
+      <div class="dd-rev">${fmtShort(revForScope)}</div>
+      ${vsTarget!==null ? `<div class="dd-vs">${vsTarget>=0?'\u25b2':'\u25bc'} <b style="color:${vsTarget>=0?'var(--green)':'var(--red)'}">${Math.abs(vsTarget).toFixed(0)}%</b> vs required daily pace (${fmtShort(target)})</div>` : ''}
+      <div class="dd-stats">
+        <div><div class="n">${fmtNum(dd.transactions)}</div><div class="l">Transactions</div></div>
+        <div><div class="n">${fmtNum(dd.units)}</div><div class="l">Units</div></div>
+        <div><div class="n">${dd.activeReps}</div><div class="l">Active Reps</div></div>
+      </div>
+    </div>
+    <div class="dd-block">
+      <div class="dd-lbl">Top Performers That Day</div>
+      <div class="chiplist">
+        ${topReps.slice(0,5).map(([n,v],i)=>`<div class="chip"><span class="name"><span class="rankbadge">${i+1}</span>${n}</span><span class="amt">${fmtShort(v)}</span></div>`).join('')}
+      </div>
+    </div>
+    <div class="dd-block">
+      <div class="dd-lbl">Category Mix</div>
+      <div class="chiplist">
+        ${topCats.slice(0,5).map(([n,v])=>`<div class="chip"><span class="name">${n}</span><span class="amt">${fmtShort(v)}</span></div>`).join('')}
+      </div>
+    </div>
+    <div class="dd-block">
+      <div class="dd-lbl">Region &amp; Top Cities</div>
+      <div class="chiplist">
+        ${dd.regionSplit.map(([n,v])=>`<div class="chip"><span class="name" style="color:${n==='North'?'var(--north)':'var(--south)'}">${n}</span><span class="amt">${fmtShort(v)}</span></div>`).join('')}
+        ${dd.topCities.slice(0,3).map(([n,v])=>`<div class="chip"><span class="name">${n}</span><span class="amt">${fmtShort(v)}</span></div>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+const gridOpt = { grid:{color:'rgba(255,255,255,.055)', drawBorder:false}, ticks:{color:'#8592AE', font:{family:"'JetBrains Mono',monospace", size:10.5}} };
+
+function renderTrendChart(){
+  destroy('trend');
+  const labels = DATA.daily.map(d=>fmtDateShort(d.DateStr));
+  const target = DATA.dailyTargetLine;
+  let datasets;
+  if(scopeType()==='bm'){
+    datasets = [
+      { label:currentBM, data: (DATA.dailyBM||[]).map(d=>d[currentBM]||0), borderColor:'#7C9CFF', backgroundColor:'rgba(124,156,255,.14)', fill:true, tension:.35, pointRadius:0, borderWidth:2 },
+    ];
+  } else if(currentRegion==='All'){
+    datasets = [
+      { label:'North', data: DATA.dailyRegion.map(d=>d.North), borderColor:'#2DD4BF', backgroundColor:'rgba(45,212,191,.12)', fill:true, tension:.35, pointRadius:0, borderWidth:2 },
+      { label:'South', data: DATA.dailyRegion.map(d=>d.South), borderColor:'#F5A524', backgroundColor:'rgba(245,165,36,.10)', fill:true, tension:.35, pointRadius:0, borderWidth:2 },
+      { label:'Daily pace needed', data: DATA.daily.map(()=>target), borderColor:'#FF6B4A', borderDash:[5,4], pointRadius:0, borderWidth:1.5, fill:false },
+    ];
+  } else {
+    datasets = [
+      { label:currentRegion, data: DATA.dailyRegion.map(d=>d[currentRegion]), borderColor: currentRegion==='North'?'#2DD4BF':'#F5A524', backgroundColor: currentRegion==='North'?'rgba(45,212,191,.14)':'rgba(245,165,36,.12)', fill:true, tension:.35, pointRadius:0, borderWidth:2 },
+    ];
+  }
+  charts.trend = new Chart(document.getElementById('trendChart'), {
+    type:'line',
+    data:{ labels, datasets },
+    options:{
+      responsive:true, interaction:{mode:'index', intersect:false},
+      plugins:{ legend:{position:'top', labels:{boxWidth:10, usePointStyle:true, color:'#8592AE', font:{size:11.5}}},
+        tooltip:{ callbacks:{ label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}` } } },
+      scales:{ x:gridOpt, y:{ ...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)} } }
+    }
+  });
+}
+
+function renderPaceChart(){
+  destroy('pace');
+  const labels = DATA.daily.map(d=>fmtDateShort(d.DateStr));
+  const cum = DATA.daily.map(d=>d.CumRevenue);
+  const cumTarget = DATA.daily.map((d,i)=> DATA.dailyTargetLine*(i+1));
+  charts.pace = new Chart(document.getElementById('paceChart'), {
+    type:'line',
+    data:{ labels, datasets:[
+      { label:'Cumulative Achieved', data:cum, borderColor:'#2DD4BF', backgroundColor:'rgba(45,212,191,.12)', fill:true, tension:.25, pointRadius:0, borderWidth:2.5 },
+      { label:'Cumulative Target Pace', data:cumTarget, borderColor:'#FF6B4A', borderDash:[5,4], pointRadius:0, borderWidth:1.5, fill:false },
+    ]},
+    options:{ responsive:true, plugins:{legend:{position:'top', labels:{boxWidth:10, usePointStyle:true, color:'#8592AE', font:{size:11.5}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}`}}},
+      scales:{ x:gridOpt, y:{...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderRegionChart(){
+  destroy('region');
+  const regions = DATA.region;
+  charts.region = new Chart(document.getElementById('regionChart'), {
+    type:'bar',
+    data:{ labels: regions.map(r=>r.Region), datasets:[
+      { label:'Target', data: regions.map(r=>r.Target), backgroundColor:'rgba(255,255,255,.14)', borderRadius:6, maxBarThickness:46 },
+      { label:'Achieved', data: regions.map(r=>r.Achieved), backgroundColor: regions.map(r=>r.Region==='North'?'#2DD4BF':'#F5A524'), borderRadius:6, maxBarThickness:46 },
+    ]},
+    options:{ responsive:true, plugins:{legend:{position:'top', labels:{boxWidth:10, usePointStyle:true, color:'#8592AE', font:{size:11.5}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}`}}},
+      scales:{ x:gridOpt, y:{...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderCatChart(){
+  destroy('cat');
+  let cats;
+  if(scopeType()==='bm') cats = (DATA.categoryBM[currentBM] || []).slice(0,7);
+  else cats = (currentRegion==='All' ? DATA.category : DATA.categoryRegion[currentRegion]).slice(0,7);
+  const palette = ['#2DD4BF','#F5A524','#FF6B4A','#8592AE','#3ECF8E','#7C9CFF','#E879F9'];
+  charts.cat = new Chart(document.getElementById('catChart'), {
+    type:'doughnut',
+    data:{ labels: cats.map(c=>c['Product Category']), datasets:[{ data: cats.map(c=>c.Revenue), backgroundColor:palette, borderColor:'#111827', borderWidth:2 }] },
+    options:{ responsive:true, cutout:'62%', plugins:{ legend:{position:'right', labels:{boxWidth:9, color:'#8592AE', font:{size:10.5}, padding:8}},
+      tooltip:{callbacks:{label:c=>`${c.label}: ${fmtShort(c.raw)}`}} } }
+  });
+}
+
+function renderRegionCards(){
+  document.getElementById('regionCards').innerHTML = DATA.region.map(r=>{
+    const pct = (r.Achieved/r.Target*100);
+    const color = r.Region==='North' ? 'var(--north)' : 'var(--south)';
+    return `<div class="rcard">
+      <div class="rcard-top"><div class="rcard-name"><i style="background:${color}"></i>${r.Region}</div><div class="rcard-pct" style="color:${color}">${pct.toFixed(1)}%</div></div>
+      <div class="bar-outer"><div class="bar-inner" style="width:${Math.min(100,pct)}%;background:${color}"></div></div>
+      <div class="rcard-meta"><span>${r.Reps} reps</span><span>${fmtShort(r.Achieved)} / ${fmtShort(r.Target)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderCatStackChart(){
+  destroy('catStack');
+  const cats = DATA.topCategories.slice(0,5);
+  const palette = ['#2DD4BF','#F5A524','#FF6B4A','#8592AE','#3ECF8E'];
+  const labels = DATA.dailyCategory.map(d=>fmtDateShort(d.DateStr));
+  charts.catStack = new Chart(document.getElementById('catStackChart'), {
+    type:'bar',
+    data:{ labels, datasets: cats.map((c,i)=>({ label:c, data: DATA.dailyCategory.map(d=>d[c]), backgroundColor:palette[i], stack:'s' })) },
+    options:{ responsive:true, plugins:{legend:{position:'top', labels:{boxWidth:9, usePointStyle:true, color:'#8592AE', font:{size:10.5}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}`}}},
+      scales:{ x:{...gridOpt, stacked:true}, y:{...gridOpt, stacked:true, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderDowChart(){
+  destroy('dow');
+  let src;
+  if(scopeType()==='bm') src = DATA.dowBM[currentBM] || [];
+  else src = currentRegion==='All' ? DATA.dow : DATA.dowRegion[currentRegion];
+  charts.dow = new Chart(document.getElementById('dowChart'), {
+    type:'bar',
+    data:{ labels: src.map(d=>d.DOW.slice(0,3)), datasets:[{ label:'Avg-style Revenue', data: src.map(d=>d.Revenue), backgroundColor:'#7C9CFF', borderRadius:6, maxBarThickness:52 }] },
+    options:{ responsive:true, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtShort(c.raw)}}},
+      scales:{ x:gridOpt, y:{...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderSlabChart(){
+  destroy('slab');
+  charts.slab = new Chart(document.getElementById('slabChart'), {
+    type:'bar',
+    data:{ labels: DATA.slab.labels, datasets:[{ data: DATA.slab.values, backgroundColor:['#F2495C','#F5A524','#F5A524','#3ECF8E','#2DD4BF'], borderRadius:6, maxBarThickness:52 }] },
+    options:{ indexAxis:'y', responsive:true, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.raw+' reps'}}},
+      scales:{ x:{...gridOpt, ticks:{...gridOpt.ticks}}, y:gridOpt } }
+  });
+}
+
+function renderTable(id, rows){
+  const tbody = document.querySelector('#'+id+' tbody');
+  tbody.innerHTML = rows.map((r,i)=>{
+    const pct = r['Achievement in %']*100;
+    return `<tr>
+      <td class="rankcell">${i+1}</td>
+      <td>${r.Name}</td>
+      <td style="color:${r.Region==='North'?'var(--north)':'var(--south)'}">${r.Region}</td>
+      <td class="num">${fmtShort(r['Revenue Target'])}</td>
+      <td class="num">${fmtShort(r['Revenue Achived'])}</td>
+      <td class="num"><span class="pct-tag ${pct>=100?'hi':'lo'}">${pct.toFixed(0)}%</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTables(){
+  let top, bottom;
+  if(scopeType()==='bm'){
+    top = DATA.top10BM[currentBM] || [];
+    bottom = DATA.bottom10BM[currentBM] || [];
+  } else {
+    top = currentRegion==='All' ? DATA.top10 : DATA.top10Region[currentRegion];
+    bottom = currentRegion==='All' ? DATA.bottom10 : DATA.bottom10Region[currentRegion];
+  }
+  renderTable('topTable', top);
+  renderTable('bottomTable', bottom);
+}
+
+function renderFomTable(){
+  const tbody = document.querySelector('#fomTable tbody');
+  tbody.innerHTML = DATA.fom.map(f=>{
+    const pct = f.AchPct;
+    return `<tr>
+      <td>${f['Field Operations Manager']}</td>
+      <td class="num">${f.Reps}</td>
+      <td class="num">${fmtShort(f.Target)}</td>
+      <td class="num">${fmtShort(f.Achieved)}</td>
+      <td class="num"><span class="pct-tag ${pct>=100?'hi':'lo'}">${pct.toFixed(0)}%</span></td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('regionFilters')?.addEventListener('click', e=>{
+  const btn = e.target.closest('.tab');
+  if(!btn) return;
+  document.querySelectorAll('#regionFilters .tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  currentRegion = btn.dataset.region;
+  if(currentRegion !== 'All'){
+    currentBM = 'All';
+    renderBmFilters();
+  }
+  renderAll();
+});
+
+function renderAbKPIs(){
+  const ab = DATA.alphaBooster;
+  if(!ab) return;
+  const k = ab.kpi;
+  const items = [
+    ["Alpha + Booster Revenue", fmtShort(k.totalRevenue), null],
+    ["% of Total Revenue", k.pctOfRevenue.toFixed(1)+"%", null],
+    ["Units Sold", fmtNum(k.totalUnits), null],
+    ["Transactions", fmtNum(k.totalTransactions), null],
+  ];
+  document.getElementById("abKpiRow").innerHTML = items.map(([l,v])=>`
+    <div class="kpi">
+      <div class="lbl">${l}</div>
+      <div class="val">${v}</div>
+      <div class="delta" style="color:var(--muted-2)">\u2014</div>
+    </div>`).join("");
+}
+
+function renderAbComboChart(){
+  destroy("abCombo");
+  const ab = DATA.alphaBooster; if(!ab || !ab.combo || !ab.combo.length) return;
+  const combo = ab.combo;
+  const palette = ["#2DD4BF","#F5A524","#FF6B4A","#7C9CFF"];
+  charts.abCombo = new Chart(document.getElementById("abComboChart"), {
+    type:"bar",
+    data:{ labels: combo.map(c=>c.Label), datasets:[{ data: combo.map(c=>c.Revenue), backgroundColor: combo.map((c,i)=>palette[i%palette.length]), borderRadius:6, maxBarThickness:56 }] },
+    options:{ responsive:true, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtShort(c.raw)}}},
+      scales:{ x:gridOpt, y:{...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderAbDailyChart(){
+  destroy("abDaily");
+  const ab = DATA.alphaBooster; if(!ab || !ab.daily || !ab.daily.length) return;
+  const labels = ab.daily.map(d=>fmtDateShort(d.DateStr));
+  charts.abDaily = new Chart(document.getElementById("abDailyChart"), {
+    type:"line",
+    data:{ labels, datasets:[
+      { label:"Alpha", data: ab.daily.map(d=>d.Alpha||0), borderColor:"#2DD4BF", backgroundColor:"rgba(45,212,191,.12)", fill:true, tension:.3, pointRadius:0, borderWidth:2 },
+      { label:"X-Factor (Booster)", data: ab.daily.map(d=>d["X-Factor"]||0), borderColor:"#F5A524", backgroundColor:"rgba(245,165,36,.10)", fill:true, tension:.3, pointRadius:0, borderWidth:2 },
+    ]},
+    options:{ responsive:true, plugins:{legend:{position:"top", labels:{boxWidth:10, usePointStyle:true, color:"#8592AE", font:{size:11.5}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}`}}},
+      scales:{ x:gridOpt, y:{...gridOpt, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderAbTypeChart(){
+  destroy("abType");
+  const ab = DATA.alphaBooster; if(!ab || !ab.typeSummary || !ab.typeSummary.length) return;
+  charts.abType = new Chart(document.getElementById("abTypeChart"), {
+    type:"doughnut",
+    data:{ labels: ab.typeSummary.map(t=>t.Type), datasets:[{ data: ab.typeSummary.map(t=>t.Revenue), backgroundColor:["#2DD4BF","#FF6B4A"], borderColor:"#111827", borderWidth:2 }] },
+    options:{ responsive:true, cutout:"62%", plugins:{ legend:{position:"right", labels:{boxWidth:9, color:"#8592AE", font:{size:10.5}, padding:8}},
+      tooltip:{callbacks:{label:c=>`${c.label}: ${fmtShort(c.raw)}`}} } }
+  });
+}
+
+function renderAbRegionChart(){
+  destroy("abRegion");
+  const ab = DATA.alphaBooster; if(!ab || !ab.regionProgram || !ab.regionProgram.length) return;
+  const rp = ab.regionProgram;
+  charts.abRegion = new Chart(document.getElementById("abRegionChart"), {
+    type:"bar",
+    data:{ labels: rp.map(r=>r.Region), datasets:[
+      { label:"Alpha", data: rp.map(r=>r.Alpha||0), backgroundColor:"#2DD4BF", borderRadius:6, maxBarThickness:40 },
+      { label:"X-Factor", data: rp.map(r=>r["X-Factor"]||0), backgroundColor:"#F5A524", borderRadius:6, maxBarThickness:40 },
+    ]},
+    options:{ responsive:true, plugins:{legend:{position:"top", labels:{boxWidth:10, usePointStyle:true, color:"#8592AE", font:{size:11.5}}},
+      tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtShort(c.raw)}`}}},
+      scales:{ x:{...gridOpt, stacked:true}, y:{...gridOpt, stacked:true, ticks:{...gridOpt.ticks, callback:v=>fmtShort(v)}} } }
+  });
+}
+
+function renderAbTopRepsTable(){
+  const ab = DATA.alphaBooster; if(!ab) return;
+  const tbody = document.querySelector("#abTopRepsTable tbody");
+  if(!tbody) return;
+  tbody.innerHTML = (ab.topReps||[]).map((r,i)=>`
+    <tr>
+      <td class="rankcell">${i+1}</td>
+      <td>${r.Name}</td>
+      <td style="color:${r.Region==="North"?"var(--north)":"var(--south)"}">${r.Region}</td>
+      <td class="num">${fmtShort(r.Revenue)}</td>
+      <td class="num">${fmtNum(r.Units)}</td>
+    </tr>`).join("");
+}
+
+function renderExecSummary(){
+  const bullets = [];
+  const push = (html, tone) => bullets.push({ html, tone: tone || "" });
+
+  let target = DATA.kpi.totalTarget, achieved = DATA.kpi.totalAchieved, reps = DATA.kpi.totalReps, above = DATA.kpi.repsAbove100;
+  if(scopeType()==='region' && currentRegion !== "All"){
+    const r = DATA.region.find(x=>x.Region===currentRegion);
+    target = r.Target; achieved = r.Achieved; reps = r.Reps;
+  } else if(scopeType()==='bm'){
+    const r = DATA.bm.find(x=>x.BM===currentBM);
+    if(r){ target = r.Target; achieved = r.Achieved; reps = r.Reps; }
+  }
+  const achPct = target ? (achieved/target*100) : 0;
+  const label = scopeLabel();
+  push(`<b>${label}: ${achPct.toFixed(1)}% achieved</b> \u2014 ${fmtShort(achieved)} of ${fmtShort(target)} target, ${DATA.kpi.activeDays}/${DATA.kpi.daysInMonth} days in.`, achPct>=100?"pos":"neg");
+
+  push(`<b>${above}/${reps} reps</b> at 100%+ target${scopeValue()==="All"?"":" in "+label}.`, (above/reps)>=0.5?"pos":"neg");
+
+  if(scopeType()==='region' && currentRegion==="All" && DATA.region.length>1){
+    const sorted = [...DATA.region].sort((a,b)=> (b.Achieved/b.Target) - (a.Achieved/a.Target));
+    const best = sorted[0], worst = sorted[sorted.length-1];
+    if(best.Region !== worst.Region){
+      push(`<b>${best.Region}</b> leads at ${(best.Achieved/best.Target*100).toFixed(0)}%, <b>${worst.Region}</b> at ${(worst.Achieved/worst.Target*100).toFixed(0)}%.`);
+    }
+  }
+
+  let top, bottom;
+  if(scopeType()==='bm'){ top = DATA.top10BM[currentBM]; bottom = DATA.bottom10BM[currentBM]; }
+  else { top = currentRegion==="All" ? DATA.top10 : DATA.top10Region[currentRegion]; bottom = currentRegion==="All" ? DATA.bottom10 : DATA.bottom10Region[currentRegion]; }
+  if(top && top.length){
+    const t = top[0];
+    push(`Top: <b>${t.Name}</b> (${t.Region}) \u2014 ${(t["Achievement in %"]*100).toFixed(0)}%.`, "pos");
+  }
+  if(bottom && bottom.length){
+    const b = bottom[0];
+    push(`Needs attention: <b>${b.Name}</b> (${b.Region}) \u2014 ${(b["Achievement in %"]*100).toFixed(0)}%.`, "neg");
+  }
+
+  if(DATA.daily && DATA.daily.length){
+    const bestDay = [...DATA.daily].sort((a,b)=>b.Revenue-a.Revenue)[0];
+    push(`Best day: <b>${fmtDate(bestDay.DateStr)}</b>, ${fmtShort(bestDay.Revenue)}.`);
+  }
+
+  let cats;
+  if(scopeType()==='bm') cats = DATA.categoryBM[currentBM];
+  else cats = currentRegion==="All" ? DATA.category : DATA.categoryRegion[currentRegion];
+  if(cats && cats.length){
+    const topCat = cats[0];
+    const totalRev = cats.reduce((s,c)=>s+c.Revenue,0);
+    push(`Top category: <b>${topCat["Product Category"]}</b> \u2014 ${(topCat.Revenue/totalRev*100).toFixed(0)}% of revenue.`);
+  }
+
+  if(scopeValue()==="All" && DATA.alphaBooster && DATA.alphaBooster.kpi && DATA.alphaBooster.kpi.totalRevenue > 0){
+    const ab = DATA.alphaBooster.kpi;
+    push(`Alpha / X Factor: <b>${fmtShort(ab.totalRevenue)}</b> \u2014 ${ab.pctOfRevenue.toFixed(0)}% of revenue.`);
+  }
+
+  const daysLeft = DATA.kpi.daysInMonth - DATA.kpi.activeDays;
+  if(daysLeft > 0 && achPct < 100){
+    const dailyNeeded = (target - achieved) / daysLeft;
+    push(`Need <b>${fmtShort(Math.max(0,dailyNeeded))}/day</b> for ${daysLeft} more day${daysLeft===1?"":"s"} to hit target.`, "neg");
+  } else if(achPct >= 100){
+    push(`Target met${scopeValue()==="All"?"":" in "+label}${daysLeft>0?" with "+daysLeft+" day(s) left":""}.`, "pos");
+  }
+
+  document.getElementById("execSummaryList").innerHTML = bullets.map(b=>
+    `<li class="${b.tone}"><span class="dot"></span><span>${b.html}</span></li>`
+  ).join("");
+}
+
+function renderAll(){
+  renderKPIs();
+  renderExecSummary();
+  renderDayStrip();
+  renderDayDetail();
+  renderTrendChart();
+  renderPaceChart();
+  renderRegionChart();
+  renderCatChart();
+  renderRegionCards();
+  renderCatStackChart();
+  renderDowChart();
+  renderSlabChart();
+  renderTables();
+  renderFomTable();
+  renderAbKPIs();
+  renderAbComboChart();
+  renderAbDailyChart();
+  renderAbTypeChart();
+  renderAbRegionChart();
+  renderAbTopRepsTable();
+}
+
+renderBmFilters();
+renderAll();
+'''
+
+BM_BUILD_BLOCK = '''
+    # ---- BM (Business/Branch Manager) breakdown ----
+    bm_df = tgt.groupby("BM").agg(
+        Target=("Revenue Target", "sum"), Achieved=("Revenue Achived", "sum"), Reps=("Denave ID", "count")
+    ).reset_index()
+    bm_df["AchPct"] = bm_df["Achieved"] / bm_df["Target"] * 100
+    bm_df = bm_df.sort_values("Achieved", ascending=False)
+    bm_list = bm_df["BM"].tolist()
+
+    rep_bm = tgt.set_index("Denave ID")["BM"].to_dict()
+    raw["BM"] = raw["Employee ID"].map(rep_bm)
+
+    db = raw.groupby(["DateStr", "BM"])["Revenue"].sum().unstack(fill_value=0).reset_index().sort_values("DateStr")
+    for b in bm_list:
+        if b not in db.columns:
+            db[b] = 0
+
+    categoryBM, dowBM, top10BM, bottom10BM = {}, {}, {}, {}
+    for b in bm_list:
+        braw = raw[raw["BM"] == b]
+        if braw.empty:
+            continue
+        categoryBM[b] = braw.groupby("Product Category").agg(
+            Revenue=("Revenue", "sum"), Units=("Quantity", "sum"), Transactions=("RowId", "count")
+        ).reset_index().sort_values("Revenue", ascending=False).to_dict("records")
+        dowBM[b] = braw.groupby("DOW").agg(
+            Revenue=("Revenue", "sum"), Transactions=("RowId", "count"), Units=("Quantity", "sum")
+        ).reindex(DOW_ORDER).fillna(0).reset_index().to_dict("records")
+        btgt = tgt[tgt["BM"] == b].sort_values("Achievement in %", ascending=False)
+        top10BM[b] = btgt.head(10)[cols].to_dict("records")
+        bottom10BM[b] = btgt.tail(10).sort_values("Achievement in %").to_dict("records")
+
+'''
 
 
-# ---------------------------------------------------------------------------
-# SMTP settings -- entered once per session, kept only in memory.
-# ---------------------------------------------------------------------------
-def sending_settings_panel():
-    st.sidebar.header("✉️ Email sending settings")
-    st.sidebar.caption("Using Outlook desktop by default -- no password needed, since it uses the Outlook app already signed in on this machine.")
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python patch_dashboard.py make_dashboard.py")
+        sys.exit(1)
 
-    send_immediately = st.sidebar.checkbox(
-        "Send immediately (skip review)",
-        value=False,
-        help="Off (default): opens each email as a normal Outlook draft, attachment already added, so you can look it over and click Send yourself. On: sends right away with no draft window.",
-        key="outlook_send_immediately",
-    )
+    path = Path(sys.argv[1])
+    if not path.exists():
+        print(f"File not found: {path}")
+        sys.exit(1)
 
-    smtp_cfg = {"host": None, "port": None, "user": None, "password": None, "sender": None}
-    use_smtp = False
-    with st.sidebar.expander("Advanced: use SMTP instead of Outlook"):
-        st.caption(
-            "Only needed if you don't have Outlook desktop, or specifically want to send via a "
-            "mail server instead. Kept in memory for this session only -- never written to disk."
-        )
-        use_smtp = st.checkbox("Use SMTP instead of Outlook for sending", value=False, key="use_smtp_toggle")
-        host = st.text_input("SMTP host", value=st.session_state.get("smtp_host", ""), placeholder="smtp.office365.com").strip()
-        port = st.text_input("SMTP port", value=st.session_state.get("smtp_port", "587")).strip()
-        user = st.text_input("SMTP username (your email)", value=st.session_state.get("smtp_user", ""), placeholder="you@canon.co.in").strip()
-        password = st.text_input("SMTP password (or app password)", value=st.session_state.get("smtp_password", ""), type="password").strip()
-        sender = st.text_input("From address (optional, defaults to username)", value=st.session_state.get("smtp_sender", "")).strip()
+    src = path.read_text(encoding="utf-8")
+    original = src
+    changes = []
 
-        st.session_state["smtp_host"] = host
-        st.session_state["smtp_port"] = port
-        st.session_state["smtp_user"] = user
-        st.session_state["smtp_password"] = password
-        st.session_state["smtp_sender"] = sender
-
-        smtp_cfg = {
-            "host": host or None,
-            "port": port or None,
-            "user": user or None,
-            "password": password or None,
-            "sender": sender or None,
-        }
-        if use_smtp:
-            configured = bool(host and user and password)
-            if configured:
-                st.success("SMTP settings entered -- will be used instead of Outlook.")
-            else:
-                st.warning("Fill in host, username, and password to actually send via SMTP.")
-
-    if use_smtp:
-        return {"method": "smtp", "smtp_config": smtp_cfg}
-    return {"method": "outlook", "send_immediately": send_immediately}
-
-
-def build_mailto_url(to_addrs, cc_addrs, subject: str, body: str) -> str:
-    """Build a mailto: URL as a fallback for people who'd rather draft the
-    email themselves in their own mail client. Browsers block mailto: links
-    from auto-attaching files (a security restriction, not something this
-    app can bypass) -- that's exactly why 'Send Now' below exists as the
-    real one-click option."""
-    import urllib.parse
-    to = ",".join(to_addrs)
-    params = {"subject": subject, "body": body}
-    if cc_addrs:
-        params["cc"] = ",".join(cc_addrs)
-    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
-    return f"mailto:{to}?{query}"
-
-
-def show_email_preview(region: str, region_html: str, month_label: str, source_name: str, send_settings: dict, original_upload_path: Path):
-    to_addrs, cc_addrs, subject, body = region_email_content(region, month_label)
-
-    st.markdown(f"#### ✉️ Email preview -- {region}")
-    st.text_input(f"To ({region})", value=", ".join(to_addrs), disabled=True, key=f"to_{region}")
-    st.text_input(f"Cc ({region})", value=", ".join(cc_addrs), disabled=True, key=f"cc_{region}")
-    st.text_input(f"Subject ({region})", value=subject, disabled=True, key=f"subj_{region}")
-    st.text_area(f"Body ({region})", value=body, height=220, disabled=True, key=f"body_{region}")
-
-    html_attachment_name = f"{Path(source_name).stem}_{region.upper()}.html"
-    xlsx_attachment_name = f"{Path(source_name).stem}_{region.upper()}.xlsx"
-    st.caption(
-        f"📎 Attachments: {html_attachment_name} (dashboard) + {xlsx_attachment_name} "
-        f"(region-filtered source data, all sheets) -- both included automatically when you send"
-    )
-
-    with st.expander(f"Preview attached dashboard ({region} view)"):
-        if hasattr(st, "iframe"):
-            st.iframe(region_html, height=1000)
-        else:
-            import streamlit.components.v1 as components
-            components.html(region_html, height=1000, scrolling=True)
-
-    # Build the region-filtered Excel workbook now so it's ready for both the
-    # download button and the send buttons below -- built once per render,
-    # cached in session_state keyed by region so re-renders don't rebuild it
-    # unnecessarily while the user is just looking at the preview.
-    xlsx_cache_key = f"region_xlsx_bytes_{region}"
-    if xlsx_cache_key not in st.session_state:
-        with st.spinner(f"Building {region} region data workbook..."):
-            tmp_xlsx = Path(tempfile.mkstemp(suffix=".xlsx")[1])
-            build_region_source_workbook(original_upload_path, region, tmp_xlsx)
-            st.session_state[xlsx_cache_key] = tmp_xlsx.read_bytes()
-            tmp_xlsx.unlink(missing_ok=True)
-    region_xlsx_bytes = st.session_state[xlsx_cache_key]
-
-    method = send_settings["method"]
-    if method == "outlook":
-        configured = True  # no credentials needed, just needs Outlook installed
-        button_label = "✅ Send Now via Outlook (both attachments included automatically)" if send_settings["send_immediately"] \
-            else "✅ Open in Outlook (both attachments included, review before sending)"
+    # 1. Fix Alpha/X-Factor column names
+    old_cols = '''    AB_TYPE_COL = "Alpha & Booster InK/Laser"
+    AB_PROG_COL = "Alpha / Booster"'''
+    new_cols = '''    AB_TYPE_COL = "Alpha & X Factor InK/Laser"
+    AB_PROG_COL = "Alpha / X Factor"'''
+    if old_cols in src:
+        src = src.replace(old_cols, new_cols)
+        changes.append("Fixed Alpha/X-Factor column names")
+    elif new_cols in src:
+        changes.append("Alpha/X-Factor column names already correct")
     else:
-        cfg = send_settings["smtp_config"]
-        configured = bool(cfg["host"] and cfg["user"] and cfg["password"])
-        button_label = "✅ Send Now (both attachments included automatically)"
+        print("WARNING: Could not find the AB_TYPE_COL/AB_PROG_COL block to patch. Check manually.")
 
-    sc1, sc2, sc3 = st.columns(3)
-    with sc1:
-        send_clicked = st.button(
-            button_label,
-            use_container_width=True,
-            type="primary",
-            disabled=not configured,
-            key=f"send_{region}",
-        )
-    with sc2:
-        st.download_button(
-            "⬇️ Download dashboard (.html)",
-            data=region_html,
-            file_name=html_attachment_name,
-            mime="text/html",
-            use_container_width=True,
-            key=f"dl_html_{region}",
-        )
-    with sc3:
-        st.download_button(
-            "⬇️ Download region data (.xlsx)",
-            data=region_xlsx_bytes,
-            file_name=xlsx_attachment_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key=f"dl_xlsx_{region}",
-        )
-
-    if not configured:
-        st.warning("Fill in the SMTP settings in the sidebar to enable 'Send Now'.")
-
-    if send_clicked:
-        spinner_msg = f"Preparing {region} email in Outlook..." if method == "outlook" else f"Sending {region} email to {len(to_addrs)} recipients..."
-        with st.spinner(spinner_msg):
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                    tmp.write(region_html.encode("utf-8"))
-                    tmp_html_path = Path(tmp.name)
-                # Give the temp files the same display names as the real attachments.
-                real_html = tmp_html_path.with_name(html_attachment_name)
-                tmp_html_path.replace(real_html)
-
-                real_xlsx = real_html.with_name(xlsx_attachment_name)
-                real_xlsx.write_bytes(region_xlsx_bytes)
-
-                attachments = [real_html, real_xlsx]
-
-                if method == "outlook":
-                    send_via_outlook(
-                        to_addrs, cc_addrs, subject, body, attachments,
-                        send_immediately=send_settings["send_immediately"],
-                    )
-                    if send_settings["send_immediately"]:
-                        st.success(f"Sent! {region} dashboard + region data emailed via Outlook to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, both attachments included.")
-                    else:
-                        st.success("Opened in Outlook -- both attachments already added. Review it and click Send whenever you're ready.")
-                else:
-                    send_email(to_addrs, cc_addrs, subject, body, attachments, smtp_config=send_settings["smtp_config"])
-                    st.success(f"Sent! {region} dashboard + region data emailed to {len(to_addrs)} To + {len(cc_addrs)} Cc recipients, both attachments included.")
-            except Exception as e:
-                st.error(f"Couldn't send the {region} email: {e}")
-
-    with st.expander("Prefer to send from your own mail app instead?"):
-        mailto_url = build_mailto_url(to_addrs, cc_addrs, subject, body)
-        if hasattr(st, "link_button"):
-            st.link_button("📧 Open draft in your mail app", mailto_url, use_container_width=True)
-        else:
-            st.markdown(
-                f'<a href="{mailto_url}" target="_blank" '
-                f'style="display:block;text-align:center;padding:0.5rem;border:1px solid #999;'
-                f'border-radius:0.5rem;text-decoration:none;">📧 Open draft in your mail app</a>',
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Browsers block mailto: links from auto-attaching files (a security restriction, "
-            "not something this app can get around), so you'd need to download both attachments "
-            "above and attach them yourself in that draft. 'Send Now' above skips all of that."
-        )
-
-
-send_settings = sending_settings_panel()
-
-if uploaded is not None:
-    upload_suffix = Path(uploaded.name).suffix or ".xlsm"
-    with tempfile.NamedTemporaryFile(suffix=upload_suffix, delete=False) as tmp:
-        tmp.write(uploaded.getbuffer())
-        tmp_path = Path(tmp.name)
-
-    try:
-        with st.spinner("Reading workbook and crunching daily / regional / rep-level breakdowns..."):
-            raw, tgt = load_workbook(tmp_path)
-            data, meta = build_dataset(raw, tgt)
-            meta["source_file"] = uploaded.name
-            html = render_html(data, meta)
-    except Exception as e:
-        st.error(
-            "Couldn't process this file. Double check it has a 'Raw Data' sheet and a "
-            "'Target vs Achievement' sheet in the same layout as the source reports.\n\n"
-            f"Details: {e}"
-        )
-        st.stop()
-
-    kpi = data["kpi"]
-    st.success(f"Dashboard built for **{meta['month_label']}** ({meta['days_active']} of {meta['days_in_month']} days active).")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Target", f"₹{kpi['totalTarget']/1e7:.2f} Cr")
-    c2.metric("Achieved", f"₹{kpi['totalAchieved']/1e7:.2f} Cr", f"{kpi['achPct']:.1f}% attained")
-    c3.metric("Transactions", f"{kpi['totalTransactions']:,}")
-    c4.metric("Reps above 100%", f"{kpi['repsAbove100']} / {kpi['totalReps']}")
-
-    st.download_button(
-        "⬇️ Download standalone HTML dashboard",
-        data=html,
-        file_name=f"{Path(uploaded.name).stem}_dashboard.html",
-        mime="text/html",
-        use_container_width=True,
-    )
-
-    st.divider()
-    st.subheader("✉️ Region emails -- preview & send")
-    st.caption(
-        "See exactly what the North / South emails would look like -- recipients, subject, "
-        "body, and the attached dashboard -- then send with one click, attachment included "
-        "automatically. The attached dashboard is built only from that region's rows (the "
-        "other region's data is never loaded into it)."
-    )
-
-    pc1, pc2 = st.columns(2)
-    if "show_preview" not in st.session_state:
-        st.session_state.show_preview = {"North": False, "South": False}
-
-    if pc1.button("👁️ Preview North email", use_container_width=True):
-        st.session_state.show_preview["North"] = True
-    if pc2.button("👁️ Preview South email", use_container_width=True):
-        st.session_state.show_preview["South"] = True
-
-    if st.session_state.show_preview["North"]:
-        north_html, north_meta = render_region_only_dashboard(raw, tgt, "North", uploaded.name)
-        show_email_preview("North", north_html, north_meta["month_label"], uploaded.name, send_settings, tmp_path)
-
-    if st.session_state.show_preview["South"]:
-        south_html, south_meta = render_region_only_dashboard(raw, tgt, "South", uploaded.name)
-        show_email_preview("South", south_html, south_meta["month_label"], uploaded.name, send_settings, tmp_path)
-
-    st.divider()
-    st.subheader("Full dashboard (All regions)")
-    if hasattr(st, "iframe"):
-        # Streamlit >= 1.56: newer, non-deprecated API. Accepts a raw HTML
-        # string directly. A fixed height is used since the page container
-        # itself has no defined height for "stretch" to fill against.
-        st.iframe(html, height=3000)
+    # 2. Insert BM build block after the tier block
+    anchor = '''    tier["AchPct"] = tier["Achieved"] / tier["Target"] * 100'''
+    if anchor in src and "bm_df = tgt.groupby" not in src:
+        src = src.replace(anchor, anchor + "\n" + BM_BUILD_BLOCK.rstrip("\n"))
+        changes.append("Inserted BM aggregation block")
+    elif "bm_df = tgt.groupby" in src:
+        changes.append("BM aggregation block already present")
     else:
-        # Older Streamlit versions don't have st.iframe yet.
-        import streamlit.components.v1 as components
-        components.html(html, height=3000, scrolling=True)
+        print("WARNING: Could not find the tier AchPct anchor line. Check manually.")
 
-else:
-    st.info("Waiting for a file upload to get started.")
+    # 3. Add BM keys to the data dict
+    old_dict_tail = '''        categoryRegion=category_region, dowRegion=dow_region, top10Region=top10_region, bottom10Region=bottom10_region,
+        alphaBooster=alpha_booster,
+    )'''
+    new_dict_tail = '''        categoryRegion=category_region, dowRegion=dow_region, top10Region=top10_region, bottom10Region=bottom10_region,
+        alphaBooster=alpha_booster,
+        bmList=bm_list, bm=bm_df.to_dict("records"), dailyBM=db[["DateStr"] + bm_list].to_dict("records"),
+        categoryBM=categoryBM, dowBM=dowBM, top10BM=top10BM, bottom10BM=bottom10BM,
+    )'''
+    if old_dict_tail in src:
+        src = src.replace(old_dict_tail, new_dict_tail)
+        changes.append("Added BM keys to the data dict")
+    elif "bmList=bm_list" in src:
+        changes.append("BM keys already present in data dict")
+    else:
+        print("WARNING: Could not find the data dict closing block. Check manually.")
+
+    # 4. Add bmFilters div to BODY_HTML
+    old_filters = '''    <button class="tab" data-region="South">South</button>
+  </div>'''
+    new_filters = '''    <button class="tab" data-region="South">South</button>
+  </div>
+
+  <div class="filters" id="bmFilters"></div>'''
+    if old_filters in src:
+        src = src.replace(old_filters, new_filters)
+        changes.append("Added bmFilters div to BODY_HTML")
+    elif 'id="bmFilters"' in src:
+        changes.append("bmFilters div already present")
+    else:
+        print("WARNING: Could not find the region filters block in BODY_HTML. Check manually.")
+
+    # 5. Replace APP_JS = '''...''' entirely
+    m = re.search(r"APP_JS = '''.*?'''\n", src, re.S)
+    if m:
+        src = src[:m.start()] + "APP_JS = '''" + NEW_APP_JS + "'''\n" + src[m.end():]
+        changes.append("Replaced APP_JS with BM-aware version")
+    else:
+        print("WARNING: Could not find the APP_JS = '''...''' block (check your quote style: it must be triple single-quotes). Check manually.")
+
+    if src == original:
+        print("No changes were made -- nothing matched. Your file may already differ from the expected structure.")
+        sys.exit(1)
+
+    backup = path.with_suffix(path.suffix + ".bak")
+    shutil.copy(path, backup)
+    path.write_text(src, encoding="utf-8")
+
+    print(f"Backed up original to: {backup}")
+    print(f"Patched: {path}")
+    print("Changes applied:")
+    for c in changes:
+        print(f"  - {c}")
+
+
+if __name__ == "__main__":
+    main()

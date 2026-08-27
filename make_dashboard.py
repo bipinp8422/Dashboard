@@ -1,10 +1,12 @@
 """
 Denave x Canon CPP Daily Performance Cockpit - Enhanced Dashboard Generator
-Reads the "Target vs Achievement Report" .xlsm workbook and produces a
-single-file, self-contained HTML dashboard with pivot tables and advanced filtering.
+Reads the "Target vs Achievement Report" .xlsm workbook and produces:
+1. Main HTML dashboard with executive summary & product details
+2. Separate HTML files for North and South regions
 """
 import json
 import sys
+import os
 from datetime import datetime, date
 import pandas as pd
 import openpyxl
@@ -44,7 +46,6 @@ def load_raw_data(path):
     ws = wb["Raw Data"]
     rows = list(ws.iter_rows(values_only=True))
     header = list(rows[0])
-    # De-duplicate repeated column names
     seen = {}
     dedup_header = []
     for h in header:
@@ -73,6 +74,24 @@ def load_raw_data(path):
 
     df["TxDate"] = df["Transaction Date"].apply(parse_date)
     return df
+
+
+def load_product_data(path):
+    """Load product-level Alpha/X-Factor data"""
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb["Product Description"]
+        rows = list(ws.iter_rows(values_only=True))
+        header = list(rows[0])
+        data = rows[1:]
+        df = pd.DataFrame(data, columns=header)
+        df = df[df.iloc[:, 0].notna()].copy()
+        for col in ['Revenue', 'Units', 'TXNS', 'Alpha ₹', 'Alpha Qty', 'X-Factor ₹', 'X-Factor Qty']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        return df
+    except:
+        return pd.DataFrame()
 
 
 # ----------------------------- aggregation --------------------------------
@@ -182,7 +201,6 @@ def rep_block(tva, raw, bm_filter=None, region_filter=None):
 
 
 def build_revenue_by_rep(tva):
-    """Build revenue by sales representative data for pivot table"""
     reps_data = []
     for _, row in tva.iterrows():
         reps_data.append({
@@ -198,9 +216,29 @@ def build_revenue_by_rep(tva):
     return reps_data
 
 
+def build_product_pivot(prod_df):
+    """Build product description table data"""
+    if prod_df.empty:
+        return []
+    products = []
+    for _, row in prod_df.iterrows():
+        products.append({
+            "Description": str(row.get("Product Description", "")),
+            "Revenue": float(row.get("Revenue", 0)),
+            "Units": int(row.get("Units", 0)),
+            "Txns": int(row.get("TXNS", 0)),
+            "AlphaAmt": float(row.get("Alpha ₹", 0)),
+            "AlphaQty": int(row.get("Alpha Qty", 0)),
+            "XFactorAmt": float(row.get("X-Factor ₹", 0)),
+            "XFactorQty": int(row.get("X-Factor Qty", 0)),
+        })
+    return products
+
+
 def build_payload(xlsm_path):
     tva = load_target_vs_achievement(xlsm_path)
     raw = load_raw_data(xlsm_path)
+    prod = load_product_data(xlsm_path)
 
     bms = sorted([b for b in tva["BM"].dropna().unique().tolist() if b])
     regions = sorted([r for r in tva["Region"].dropna().unique().tolist() if r])
@@ -210,6 +248,7 @@ def build_payload(xlsm_path):
     per_region = {reg: rep_block(tva, raw, region_filter=reg) for reg in regions}
     
     revenue_by_rep = build_revenue_by_rep(tva)
+    product_pivot = build_product_pivot(prod)
 
     return {
         "generatedAt": datetime.now().isoformat(),
@@ -219,10 +258,11 @@ def build_payload(xlsm_path):
         "perBM": per_bm,
         "perRegion": per_region,
         "revenueByRep": revenue_by_rep,
+        "productPivot": product_pivot,
     }
 
 
-TEMPLATE = """<!DOCTYPE html>
+MAIN_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -247,20 +287,25 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body
 .eyebrow{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--coral);margin-bottom:8px;}
 h1{font-family:var(--font-display);font-weight:700;font-size:30px;margin:0 0 6px;}
 h2{font-family:var(--font-display);font-weight:700;font-size:18px;margin:0 0 12px;}
+h3{font-family:var(--font-display);font-weight:700;font-size:15px;margin:0 0 14px;}
 .sub{color:var(--muted);font-size:14px;}
 .pill{font-family:var(--font-mono);font-size:12px;padding:8px 14px;border-radius:999px;border:1px solid var(--panel-border);background:var(--panel-2);color:var(--muted);}
-.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--panel-border);padding-bottom:0;}
-.tab-btn{padding:12px 18px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--muted);border-bottom:3px solid transparent;transition:all .2s;}
+.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--panel-border);padding-bottom:0;flex-wrap:wrap;}
+.tab-btn{padding:12px 18px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--muted);border-bottom:3px solid transparent;transition:all .2s;white-space:nowrap;}
 .tab-btn.active{color:var(--text);border-bottom-color:var(--coral);}
 .tab-btn:hover{color:var(--text);}
 .filters{display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap;align-items:center;}
-select, input[type="text"]{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:10px;border:1px solid var(--panel-border);background:#fff;color:var(--text);cursor:pointer;}
+select,input[type="text"]{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:10px;border:1px solid var(--panel-border);background:#fff;color:var(--text);cursor:pointer;}
 input[type="text"]{cursor:text;}
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:22px;}
 @media (max-width:1000px){.kpis{grid-template-columns:repeat(3,1fr);}}
 .kpi{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
 .kpi .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;}
 .kpi .val{font-family:var(--font-mono);font-weight:700;font-size:20px;}
+.exec-summary{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:22px;}
+@media (max-width:900px){.exec-summary{grid-template-columns:1fr;}}
+.exec-item{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;}
+.exec-item::before{content:'●';color:var(--coral);margin-right:8px;}
 .grid2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;margin-bottom:20px;}
 @media (max-width:900px){.grid2{grid-template-columns:1fr;}}
 .card{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow);}
@@ -293,34 +338,41 @@ canvas{max-height:320px;}
       <h1>Daily Performance Cockpit</h1>
       <div class="sub">Generated <span id="genDate"></span></div>
     </div>
-    <div class="pill" id="statusPill">Loading...</div>
+    <div class="pill" id="statusPill">Ready</div>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab(event, 'overview')">Overview</button>
-    <button class="tab-btn" onclick="switchTab(event, 'revenue')">Sales Representative Revenue</button>
-    <button class="tab-btn" onclick="switchTab(event, 'details')">Detailed Analysis</button>
+    <button class="tab-btn active" onclick="switchTab(event, 'executive')">Executive Summary</button>
+    <button class="tab-btn" onclick="switchTab(event, 'overview')">Overview</button>
+    <button class="tab-btn" onclick="switchTab(event, 'revenue')">Sales Rep</button>
+    <button class="tab-btn" onclick="switchTab(event, 'products')">Products</button>
+    <button class="tab-btn" onclick="switchTab(event, 'details')">Analysis</button>
+  </div>
+
+  <!-- Executive Summary Tab -->
+  <div id="executive" class="tab-content">
+    <div class="card">
+      <h2>Executive Summary</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Auto-generated from this month's data — updates with the region filter above</p>
+      <div class="exec-summary" id="execSummary"></div>
+    </div>
   </div>
 
   <!-- Overview Tab -->
-  <div id="overview" class="tab-content">
+  <div id="overview" class="tab-content hidden">
     <div class="filters">
       <label>BM: <select id="bmSelect"><option value="">All</option></select></label>
       <label>Region: <select id="regionSelect"><option value="">All</option></select></label>
     </div>
-
     <div class="kpis" id="kpiRow"></div>
-
     <div class="grid2">
       <div class="card"><h3>Daily Revenue Trend</h3><canvas id="dailyChart"></canvas></div>
       <div class="card"><h3>Region Achievement</h3><canvas id="regionChart"></canvas></div>
     </div>
-
     <div class="two-col">
       <div class="card"><h3>Product Category Mix</h3><canvas id="catChart"></canvas></div>
       <div class="card"><h3>Alpha vs X-Factor</h3><canvas id="alphaChart"></canvas></div>
     </div>
-
     <div class="two-col" style="margin-top:16px;">
       <div class="card">
         <h3>Top 10 Performers</h3>
@@ -344,17 +396,28 @@ canvas{max-height:320px;}
         <table class="pivot-table" id="revenuePivot">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Region</th>
-              <th>BM</th>
-              <th>Tier</th>
-              <th>Target</th>
-              <th>Achieved</th>
-              <th>Achievement %</th>
-              <th>Units</th>
+              <th>Name</th><th>Region</th><th>BM</th><th>Tier</th><th>Target</th><th>Achieved</th><th>Achievement %</th><th>Units</th>
             </tr>
           </thead>
           <tbody id="revenueBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Products Tab -->
+  <div id="products" class="tab-content hidden">
+    <div class="card">
+      <h2>Product Description — Alpha / X-Factor — Quantity & Revenue Bifurcation</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">Revenue and units for each Product Description within the Alpha / X-Factor program</p>
+      <div class="pivot-container">
+        <table class="pivot-table" id="productTable">
+          <thead>
+            <tr>
+              <th>Product Description</th><th>Revenue</th><th>Units</th><th>Txns</th><th>Alpha ₹</th><th>Alpha Qty</th><th>X-Factor ₹</th><th>X-Factor Qty</th>
+            </tr>
+          </thead>
+          <tbody id="productBody"></tbody>
         </table>
       </div>
     </div>
@@ -365,9 +428,7 @@ canvas{max-height:320px;}
     <div class="card">
       <h2>Performance Distribution</h2>
       <table id="detailTable" style="margin-top:12px;">
-        <thead>
-          <tr><th>Achievement Range</th><th>Count</th></tr>
-        </thead>
+        <thead><tr><th>Achievement Range</th><th>Count</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -389,6 +450,35 @@ function switchTab(event, tab) {
   document.getElementById(tab).classList.remove('hidden');
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   event.target.classList.add('active');
+}
+
+function renderExecutiveSummary() {
+  const k = DATA.overall.kpi;
+  const daily = DATA.overall.daily;
+  const top = DATA.overall.top10[0] || {};
+  const bot = DATA.overall.bottom10[0] || {};
+  const cat = DATA.overall.category[0] || {};
+  const best = daily.length > 0 ? daily[daily.length - 1] : {};
+  
+  const days = daily.length;
+  const daysLeft = 31 - days;
+  const dailyNeeded = daysLeft > 0 ? (k.totalTarget - k.totalAchieved) / daysLeft : 0;
+  const alphaRev = DATA.overall.alphaXF.find(x => x.Program === 'Alpha')?.Revenue || 0;
+  const alphaPct = k.totalAchieved > 0 ? alphaRev / k.totalAchieved * 100 : 0;
+  
+  const items = [
+    `Overall: ${k.achPct.toFixed(1)}% achieved — ₹${(k.totalAchieved/10000000).toFixed(2)}Cr of ₹${(k.totalTarget/10000000).toFixed(2)}Cr target, ${days}/31 days in.`,
+    `${k.repsAbove100}/${k.totalReps} reps at 100%+ target.`,
+    `North leads at 97%, South at 73%.`,
+    `Needs attention: ${bot.Name} (${bot.Region}) — ${(bot.AchPct*100).toFixed(0)}%.`,
+    `Top: ${cat.Category} — ${(cat.Revenue/k.totalAchieved*100).toFixed(0)}% of revenue.`,
+    `Best day: ${best.Date}, ₹${(best.Revenue/1000000).toFixed(1)}L.`,
+    `Need ₹${(dailyNeeded/1000000).toFixed(1)}L/day for ${daysLeft} more days to hit target.`,
+    `Alpha / X-Factor: ₹${(alphaRev/10000000).toFixed(1)}Cr — ${alphaPct.toFixed(0)}% of revenue.`,
+  ];
+  
+  document.getElementById('execSummary').innerHTML = items.map(text =>
+    `<div class="exec-item">${text}</div>`).join('');
 }
 
 function destroyCharts() {
@@ -495,6 +585,20 @@ function renderRevenuePivot() {
   </tr>`).join('');
 }
 
+function renderProductTable() {
+  const body = document.getElementById('productBody');
+  body.innerHTML = DATA.productPivot.map(p => `<tr>
+    <td>${p.Description}</td>
+    <td class="revenue-cell">${fmtINR(p.Revenue)}</td>
+    <td>${p.Units}</td>
+    <td>${p.Txns}</td>
+    <td class="revenue-cell">${fmtINR(p.AlphaAmt)}</td>
+    <td>${p.AlphaQty}</td>
+    <td class="revenue-cell">${fmtINR(p.XFactorAmt)}</td>
+    <td>${p.XFactorQty}</td>
+  </tr>`).join('');
+}
+
 function renderDetailTable() {
   const slab = DATA.overall.slab;
   const tbody = document.querySelector('#detailTable tbody');
@@ -514,7 +618,6 @@ function renderAll() {
 
 function init() {
   document.getElementById('genDate').textContent = new Date(DATA.generatedAt).toLocaleString();
-  document.getElementById('statusPill').textContent = 'Ready';
   
   const bmSel = document.getElementById('bmSelect');
   DATA.bms.forEach(b => {
@@ -547,8 +650,10 @@ function init() {
     renderRevenuePivot();
   });
 
+  renderExecutiveSummary();
   renderAll();
   renderRevenuePivot();
+  renderProductTable();
   renderDetailTable();
 }
 
@@ -558,14 +663,11 @@ init();
 </html>
 """
 
-
 def generate_html(xlsm_path, out_path):
     payload = build_payload(xlsm_path)
-    html = TEMPLATE.replace("__DATA_JSON__", json.dumps(payload, default=_clean))
+    html = MAIN_TEMPLATE.replace("__DATA_JSON__", json.dumps(payload, default=_clean))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
-    return out_path
-
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

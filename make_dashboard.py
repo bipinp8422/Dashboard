@@ -1,7 +1,7 @@
 """
-Denave x Canon CPP Daily Performance Cockpit - Dashboard Generator
+Denave x Canon CPP Daily Performance Cockpit - Enhanced Dashboard Generator
 Reads the "Target vs Achievement Report" .xlsm workbook and produces a
-single-file, self-contained HTML dashboard (Chart.js via CDN).
+single-file, self-contained HTML dashboard with pivot tables and advanced filtering.
 """
 import json
 import sys
@@ -44,7 +44,7 @@ def load_raw_data(path):
     ws = wb["Raw Data"]
     rows = list(ws.iter_rows(values_only=True))
     header = list(rows[0])
-    # De-duplicate repeated column names (workbook has "Transaction Date" twice, etc.)
+    # De-duplicate repeated column names
     seen = {}
     dedup_header = []
     for h in header:
@@ -181,6 +181,23 @@ def rep_block(tva, raw, bm_filter=None, region_filter=None):
     }
 
 
+def build_revenue_by_rep(tva):
+    """Build revenue by sales representative data for pivot table"""
+    reps_data = []
+    for _, row in tva.iterrows():
+        reps_data.append({
+            "Name": row["Name"],
+            "Region": row["Region"],
+            "BM": row["BM"],
+            "Tier": row["Tier"],
+            "Target": float(row["Revenue Target"]),
+            "Achieved": float(row["Revenue Achived"]),
+            "AchPct": float(row["Achievement in %"]) * 100,
+            "Units": int(row["Units Sold"]),
+        })
+    return reps_data
+
+
 def build_payload(xlsm_path):
     tva = load_target_vs_achievement(xlsm_path)
     raw = load_raw_data(xlsm_path)
@@ -191,6 +208,8 @@ def build_payload(xlsm_path):
     overall = rep_block(tva, raw)
     per_bm = {bm: rep_block(tva, raw, bm_filter=bm) for bm in bms}
     per_region = {reg: rep_block(tva, raw, region_filter=reg) for reg in regions}
+    
+    revenue_by_rep = build_revenue_by_rep(tva)
 
     return {
         "generatedAt": datetime.now().isoformat(),
@@ -199,6 +218,7 @@ def build_payload(xlsm_path):
         "overall": overall,
         "perBM": per_bm,
         "perRegion": per_region,
+        "revenueByRep": revenue_by_rep,
     }
 
 
@@ -207,12 +227,14 @@ TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Denave x Canon CPP -- Daily Performance Cockpit</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<title>Denave × Canon CPP — Daily Performance Cockpit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
 :root{
-  --bg:#FFFFFF; --panel:#FFFFFF; --panel-2:#F7F9FC; --panel-border:rgba(15,23,42,.08);
+  --bg:#F8FAFC; --panel:#fff; --panel-2:#F1F5F9; --panel-border:#E2E8F0;
   --text:#0F172A; --muted:#475569; --coral:#EF5A2E; --north:#0EA5A2; --south:#F59E0B;
   --green:#16A34A; --red:#DC2626; --radius:14px;
   --shadow:0 4px 14px rgba(15,23,42,.06);
@@ -220,14 +242,20 @@ TEMPLATE = """<!DOCTYPE html>
 }
 *{box-sizing:border-box;}
 body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);}
-.wrap{max-width:1360px;margin:0 auto;padding:28px 28px 60px;}
+.wrap{max-width:1400px;margin:0 auto;padding:28px 28px 60px;}
 .topbar{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;padding-bottom:22px;margin-bottom:24px;border-bottom:1px solid var(--panel-border);flex-wrap:wrap;}
 .eyebrow{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--coral);margin-bottom:8px;}
 h1{font-family:var(--font-display);font-weight:700;font-size:30px;margin:0 0 6px;}
+h2{font-family:var(--font-display);font-weight:700;font-size:18px;margin:0 0 12px;}
 .sub{color:var(--muted);font-size:14px;}
 .pill{font-family:var(--font-mono);font-size:12px;padding:8px 14px;border-radius:999px;border:1px solid var(--panel-border);background:var(--panel-2);color:var(--muted);}
+.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--panel-border);padding-bottom:0;}
+.tab-btn{padding:12px 18px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--muted);border-bottom:3px solid transparent;transition:all .2s;}
+.tab-btn.active{color:var(--text);border-bottom-color:var(--coral);}
+.tab-btn:hover{color:var(--text);}
 .filters{display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap;align-items:center;}
-select{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:10px;border:1px solid var(--panel-border);background:#fff;color:var(--text);cursor:pointer;}
+select, input[type="text"]{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:10px;border:1px solid var(--panel-border);background:#fff;color:var(--text);cursor:pointer;}
+input[type="text"]{cursor:text;}
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:22px;}
 @media (max-width:1000px){.kpis{grid-template-columns:repeat(3,1fr);}}
 .kpi{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
@@ -239,13 +267,22 @@ select{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 1
 .card h3{font-family:var(--font-display);font-size:15px;margin:0 0 14px;}
 table{width:100%;border-collapse:collapse;font-size:13px;}
 th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--panel-border);}
-th{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;}
+th{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;font-weight:600;}
+td{padding:10px 6px;}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;}
 .badge.good{background:rgba(22,163,74,.12);color:var(--green);}
 .badge.bad{background:rgba(220,38,38,.12);color:var(--red);}
+.badge.north{background:rgba(14,165,162,.12);color:var(--north);}
+.badge.south{background:rgba(245,158,11,.12);color:var(--south);}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
 @media (max-width:900px){.two-col{grid-template-columns:1fr;}}
 canvas{max-height:320px;}
+.hidden{display:none;}
+.pivot-container{overflow-x:auto;}
+.pivot-table{width:100%;border-collapse:collapse;}
+.pivot-table td{padding:10px 6px;border-bottom:1px solid var(--panel-border);}
+.pivot-table tr:hover{background:var(--panel-2);}
+.revenue-cell{font-family:var(--font-mono);font-weight:600;}
 </style>
 </head>
 <body>
@@ -259,31 +296,80 @@ canvas{max-height:320px;}
     <div class="pill" id="statusPill">Loading...</div>
   </div>
 
-  <div class="filters">
-    <label>BM: <select id="bmSelect"><option value="">All</option></select></label>
-    <label>Region: <select id="regionSelect"><option value="">All</option></select></label>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
+    <button class="tab-btn" onclick="switchTab('revenue')">Sales Representative Revenue</button>
+    <button class="tab-btn" onclick="switchTab('details')">Detailed Analysis</button>
   </div>
 
-  <div class="kpis" id="kpiRow"></div>
+  <!-- Overview Tab -->
+  <div id="overview" class="tab-content">
+    <div class="filters">
+      <label>BM: <select id="bmSelect"><option value="">All</option></select></label>
+      <label>Region: <select id="regionSelect"><option value="">All</option></select></label>
+    </div>
 
-  <div class="grid2">
-    <div class="card"><h3>Daily Revenue Trend</h3><canvas id="dailyChart"></canvas></div>
-    <div class="card"><h3>Region Achievement</h3><canvas id="regionChart"></canvas></div>
+    <div class="kpis" id="kpiRow"></div>
+
+    <div class="grid2">
+      <div class="card"><h3>Daily Revenue Trend</h3><canvas id="dailyChart"></canvas></div>
+      <div class="card"><h3>Region Achievement</h3><canvas id="regionChart"></canvas></div>
+    </div>
+
+    <div class="two-col">
+      <div class="card"><h3>Product Category Mix</h3><canvas id="catChart"></canvas></div>
+      <div class="card"><h3>Alpha vs X-Factor</h3><canvas id="alphaChart"></canvas></div>
+    </div>
+
+    <div class="two-col" style="margin-top:16px;">
+      <div class="card">
+        <h3>Top 10 Performers</h3>
+        <table id="topTable"><thead><tr><th>Name</th><th>Region</th><th>Achieved</th><th>%</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h3>Bottom 10 Performers</h3>
+        <table id="bottomTable"><thead><tr><th>Name</th><th>Region</th><th>Achieved</th><th>%</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
   </div>
 
-  <div class="two-col">
-    <div class="card"><h3>Product Category Mix</h3><canvas id="catChart"></canvas></div>
-    <div class="card"><h3>Alpha vs X-Factor</h3><canvas id="alphaChart"></canvas></div>
-  </div>
-
-  <div class="two-col" style="margin-top:16px;">
-    <div class="card">
-      <h3>Top 10 Performers</h3>
-      <table id="topTable"><thead><tr><th>Name</th><th>Region</th><th>Achieved</th><th>%</th></tr></thead><tbody></tbody></table>
+  <!-- Revenue by Rep Tab -->
+  <div id="revenue" class="tab-content hidden">
+    <div class="filters">
+      <label>Search: <input type="text" id="pivotSearch" placeholder="Filter by name or region..."></label>
     </div>
     <div class="card">
-      <h3>Bottom 10 Performers</h3>
-      <table id="bottomTable"><thead><tr><th>Name</th><th>Region</th><th>Achieved</th><th>%</th></tr></thead><tbody></tbody></table>
+      <h2>Sales Representative Target vs Achievement Report</h2>
+      <div class="pivot-container">
+        <table class="pivot-table" id="revenuePivot">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Region</th>
+              <th>BM</th>
+              <th>Tier</th>
+              <th>Target</th>
+              <th>Achieved</th>
+              <th>Achievement %</th>
+              <th>Units</th>
+            </tr>
+          </thead>
+          <tbody id="revenueBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Details Tab -->
+  <div id="details" class="tab-content hidden">
+    <div class="card">
+      <h2>Performance Distribution</h2>
+      <table id="detailTable" style="margin-top:12px;">
+        <thead>
+          <tr><th>Achievement Range</th><th>Count</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -291,12 +377,25 @@ canvas{max-height:320px;}
 <script>
 const DATA = __DATA_JSON__;
 let charts = {};
-const fmtINR = n => '\u20B9' + Math.round(n).toLocaleString('en-IN');
+let pivotQuery = '';
+
+const REGION_COLORS = {'North':'#0EA5A2', 'South':'#F59E0B'};
+const fmtINR = n => '₹' + Math.round(n).toLocaleString('en-IN');
 const fmtPct = n => (n*100).toFixed(1) + '%';
 
-function destroyCharts(){ Object.values(charts).forEach(c=>c && c.destroy()); charts = {}; }
+function switchTab(tab) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+  document.getElementById(tab).classList.remove('hidden');
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  event.target.classList.add('active');
+}
 
-function currentBlock(){
+function destroyCharts() {
+  Object.values(charts).forEach(c => c && c.destroy());
+  charts = {};
+}
+
+function currentBlock() {
   const bm = document.getElementById('bmSelect').value;
   const region = document.getElementById('regionSelect').value;
   if (bm) return DATA.perBM[bm];
@@ -304,7 +403,7 @@ function currentBlock(){
   return DATA.overall;
 }
 
-function renderKPIs(block){
+function renderKPIs(block) {
   const k = block.kpi;
   const items = [
     ['Target', fmtINR(k.totalTarget)],
@@ -318,7 +417,7 @@ function renderKPIs(block){
     `<div class="kpi"><div class="lbl">${lbl}</div><div class="val">${val}</div></div>`).join('');
 }
 
-function renderDaily(block){
+function renderDaily(block) {
   const ctx = document.getElementById('dailyChart');
   charts.daily = new Chart(ctx, {
     type: 'line',
@@ -333,7 +432,7 @@ function renderDaily(block){
   });
 }
 
-function renderRegion(block){
+function renderRegion(block) {
   const ctx = document.getElementById('regionChart');
   charts.region = new Chart(ctx, {
     type: 'bar',
@@ -348,7 +447,7 @@ function renderRegion(block){
   });
 }
 
-function renderCategory(block){
+function renderCategory(block) {
   const ctx = document.getElementById('catChart');
   const top = block.category.slice(0,8);
   charts.cat = new Chart(ctx, {
@@ -358,7 +457,7 @@ function renderCategory(block){
   });
 }
 
-function renderAlpha(block){
+function renderAlpha(block) {
   const ctx = document.getElementById('alphaChart');
   charts.alpha = new Chart(ctx, {
     type: 'pie',
@@ -367,16 +466,41 @@ function renderAlpha(block){
   });
 }
 
-function renderTables(block){
+function renderTables(block) {
   const topBody = document.querySelector('#topTable tbody');
   const botBody = document.querySelector('#bottomTable tbody');
-  const row = r => `<tr><td>${r.Name}</td><td>${r.Region}</td><td>${fmtINR(r.Achieved)}</td>
+  const row = r => `<tr><td>${r.Name}</td><td><span class="badge ${REGION_COLORS[r.Region]?'north':'south'}">${r.Region}</span></td><td>${fmtINR(r.Achieved)}</td>
     <td><span class="badge ${r.AchPct>=1?'good':'bad'}">${fmtPct(r.AchPct)}</span></td></tr>`;
   topBody.innerHTML = block.top10.map(row).join('');
   botBody.innerHTML = block.bottom10.map(row).join('');
 }
 
-function render(){
+function renderRevenuePivot() {
+  const body = document.getElementById('revenueBody');
+  let filtered = DATA.revenueByRep;
+  if (pivotQuery) {
+    const q = pivotQuery.toLowerCase();
+    filtered = filtered.filter(r => r.Name.toLowerCase().includes(q) || r.Region.toLowerCase().includes(q));
+  }
+  body.innerHTML = filtered.map(r => `<tr>
+    <td>${r.Name}</td>
+    <td><span class="badge ${r.Region === 'North' ? 'north' : 'south'}">${r.Region}</span></td>
+    <td>${r.BM}</td>
+    <td>${r.Tier}</td>
+    <td class="revenue-cell">${fmtINR(r.Target)}</td>
+    <td class="revenue-cell">${fmtINR(r.Achieved)}</td>
+    <td><span class="badge ${r.AchPct >= 100 ? 'good' : 'bad'}">${r.AchPct.toFixed(1)}%</span></td>
+    <td>${r.Units}</td>
+  </tr>`).join('');
+}
+
+function renderDetailTable() {
+  const slab = DATA.overall.slab;
+  const tbody = document.querySelector('#detailTable tbody');
+  tbody.innerHTML = slab.labels.map((lbl, i) => `<tr><td>${lbl}</td><td>${slab.values[i]}</td></tr>`).join('');
+}
+
+function renderAll() {
   const block = currentBlock();
   destroyCharts();
   renderKPIs(block);
@@ -387,17 +511,46 @@ function render(){
   renderTables(block);
 }
 
-function init(){
+function init() {
   document.getElementById('genDate').textContent = new Date(DATA.generatedAt).toLocaleString();
   document.getElementById('statusPill').textContent = 'Ready';
+  
   const bmSel = document.getElementById('bmSelect');
-  DATA.bms.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; bmSel.appendChild(o); });
+  DATA.bms.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b;
+    o.textContent = b;
+    bmSel.appendChild(o);
+  });
+  
   const regSel = document.getElementById('regionSelect');
-  DATA.regions.forEach(r=>{ const o=document.createElement('option'); o.value=r; o.textContent=r; regSel.appendChild(o); });
-  bmSel.addEventListener('change', ()=>{ if(bmSel.value) regSel.value=''; render(); });
-  regSel.addEventListener('change', ()=>{ if(regSel.value) bmSel.value=''; render(); });
-  render();
+  DATA.regions.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r;
+    o.textContent = r;
+    regSel.appendChild(o);
+  });
+  
+  bmSel.addEventListener('change', () => {
+    if (bmSel.value) regSel.value = '';
+    renderAll();
+  });
+  
+  regSel.addEventListener('change', () => {
+    if (regSel.value) bmSel.value = '';
+    renderAll();
+  });
+
+  document.getElementById('pivotSearch').addEventListener('input', e => {
+    pivotQuery = e.target.value.trim();
+    renderRevenuePivot();
+  });
+
+  renderAll();
+  renderRevenuePivot();
+  renderDetailTable();
 }
+
 init();
 </script>
 </body>

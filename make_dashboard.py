@@ -297,9 +297,9 @@ canvas{max-height:320px;}
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
-    <button class="tab-btn" onclick="switchTab('revenue')">Sales Representative Revenue</button>
-    <button class="tab-btn" onclick="switchTab('details')">Detailed Analysis</button>
+    <button class="tab-btn active" onclick="switchTab(event, 'overview')">Overview</button>
+    <button class="tab-btn" onclick="switchTab(event, 'revenue')">Sales Representative Revenue</button>
+    <button class="tab-btn" onclick="switchTab(event, 'details')">Detailed Analysis</button>
   </div>
 
   <!-- Overview Tab -->
@@ -383,7 +383,8 @@ const REGION_COLORS = {'North':'#0EA5A2', 'South':'#F59E0B'};
 const fmtINR = n => '₹' + Math.round(n).toLocaleString('en-IN');
 const fmtPct = n => (n*100).toFixed(1) + '%';
 
-function switchTab(tab) {
+function switchTab(event, tab) {
+  event.preventDefault();
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
   document.getElementById(tab).classList.remove('hidden');
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));

@@ -2,7 +2,7 @@ import io
 import tempfile
 import os
 import streamlit as st
-from make_dashboard_enhanced import generate_html
+from make_dashboard import generate_html
 
 st.set_page_config(
     page_title="Denave x Canon CPP Dashboard Generator",

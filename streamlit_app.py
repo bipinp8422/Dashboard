@@ -1,52 +1,98 @@
-import io
-import tempfile
-import os
 import streamlit as st
+import os
+import tempfile
 from make_dashboard import generate_html
 
-st.set_page_config(
-    page_title="Denave x Canon CPP Dashboard Generator",
-    page_icon="📊",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="Denave CPP Dashboard Generator", layout="wide")
 
-st.title("📊 Denave x Canon CPP -- Dashboard Generator")
-st.write(
-    "Upload the **Target vs Achievement Report** workbook (.xlsm/.xlsx) and click "
-    "**Generate** to build a downloadable HTML performance dashboard with pivot tables and advanced analytics."
-)
+st.markdown("""
+<style>
+.main-title {
+    font-size: 2.5em;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+.subtitle {
+    font-size: 1.1em;
+    color: #666;
+    margin-bottom: 20px;
+}
+</style>
+<div class="main-title">📊 Denave × Canon CPP Dashboard</div>
+<div class="subtitle">Region-wise Performance Cockpit Generator</div>
+""", unsafe_allow_html=True)
 
-uploaded = st.file_uploader("Upload workbook", type=["xlsm", "xlsx"])
+col1, col2 = st.columns(2)
 
-if uploaded is not None:
-    st.success(f"✅ Loaded: {uploaded.name} ({uploaded.size/1_000_000:.1f} MB)")
-    if st.button("🚀 Generate Dashboard", type="primary", use_container_width=True):
-        with st.spinner("📈 Crunching numbers and building your dashboard..."):
-            with tempfile.TemporaryDirectory() as tmp:
-                in_path = os.path.join(tmp, uploaded.name)
-                with open(in_path, "wb") as f:
-                    f.write(uploaded.getbuffer())
-                out_path = os.path.join(tmp, "dashboard.html")
-                try:
-                    generate_html(in_path, out_path)
-                except Exception as e:
-                    st.error(f"❌ Failed to generate dashboard: {e}")
-                    st.stop()
-                with open(out_path, "rb") as f:
-                    html_bytes = f.read()
+with col1:
+    st.info("📋 **How it works:**\n1. Upload your Excel file\n2. Generate separate dashboards\n3. Download North & South dashboards")
 
-        st.success("✨ Dashboard generated successfully!")
-        out_name = os.path.splitext(uploaded.name)[0] + "-dashboard.html"
-        st.download_button(
-            "⬇️ Download Dashboard HTML",
-            data=html_bytes,
-            file_name=out_name,
-            mime="text/html",
-            use_container_width=True
-        )
-        st.divider()
-        st.subheader("📋 Dashboard Preview")
-        st.components.v1.html(html_bytes.decode("utf-8"), height=1200, scrolling=True)
-else:
-    st.info("⏳ Waiting for a file upload...")
+with col2:
+    st.success("✨ **Features:**\n- Executive summary\n- KPI cards\n- Interactive charts\n- Rep rankings\n- Product details")
+
+st.divider()
+
+uploaded_file = st.file_uploader("Upload Excel (.xlsm/.xlsx)", type=["xlsm", "xlsx"])
+
+if uploaded_file:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Save uploaded file
+        input_path = os.path.join(tmpdir, uploaded_file.name)
+        with open(input_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        # Generate dashboards
+        if st.button("🚀 Generate Dashboards", use_container_width=True):
+            st.info("Generating region-wise dashboards...")
+            
+            try:
+                results = generate_html(input_path, tmpdir)
+                
+                st.success("✅ Dashboards generated successfully!")
+                st.divider()
+                
+                col1, col2 = st.columns(2)
+                
+                for region, path_or_error, success in results:
+                    if success:
+                        with open(path_or_error, "rb") as f:
+                            if region == "North":
+                                with col1:
+                                    st.markdown(f"### 🔵 {region} Region")
+                                    st.download_button(
+                                        label=f"📥 Download {region} Dashboard",
+                                        data=f.read(),
+                                        file_name=f"dashboard_{region}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                            else:
+                                with col2:
+                                    st.markdown(f"### 🟡 {region} Region")
+                                    st.download_button(
+                                        label=f"📥 Download {region} Dashboard",
+                                        data=f.read(),
+                                        file_name=f"dashboard_{region}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                        
+                        with st.expander(f"ℹ️ {region} Details"):
+                            st.caption(f"✓ File: {path_or_error}")
+                    else:
+                        st.error(f"✗ {region}: {path_or_error}")
+                
+            except Exception as e:
+                st.error(f"❌ Error generating dashboards: {str(e)}")
+
+st.divider()
+st.markdown("""
+### 📌 Requirements
+- **Excel format**: .xlsm or .xlsx
+- **Sheets needed**: 
+  - Target vs Achievement
+  - Raw Data
+  - Product Description (optional)
+""")
+
+st.caption("💡 Tip: Keep the Excel file open to make updates, then re-upload to refresh dashboards")

@@ -1,6 +1,6 @@
 """
-Denave x Canon CPP Daily Performance Cockpit - Region-Wise Dashboard Generator
-With BM filtering on Overview and Sales Rep pages
+Denave x Canon CPP Daily Performance Cockpit - Enhanced Professional Dashboard
+Region-Wise with Professional Header, Action Buttons, and Key Metrics Display
 """
 import json
 import sys
@@ -10,7 +10,6 @@ import pandas as pd
 import openpyxl
 
 
-# ----------------------------- helpers -----------------------------------
 def _clean(v):
     if isinstance(v, (datetime, date)):
         return v.isoformat()
@@ -75,7 +74,6 @@ def load_raw_data(path):
 
 
 def load_product_data(path):
-    """Load product-level Alpha/X-Factor data"""
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb["Product Description"]
@@ -92,7 +90,6 @@ def load_product_data(path):
         return pd.DataFrame()
 
 
-# ----------------------------- aggregation --------------------------------
 def slab_counts(pct_series):
     bins = [-1e18, 0.09, 0.50, 0.75, 0.90, 1.00, 1e18]
     labels = ["0-9%", "10-50%", "51-75%", "76-90%", "91-100%", "Above 100%"]
@@ -219,7 +216,6 @@ def build_revenue_by_rep(tva, region=None, bm_filter=None):
 
 
 def build_product_pivot(prod_df):
-    """Build product description table data"""
     if prod_df.empty:
         return []
     products = []
@@ -238,25 +234,24 @@ def build_product_pivot(prod_df):
 
 
 def build_payload_for_region(xlsm_path, region):
-    """Build payload for specific region with BM filtering"""
     tva = load_target_vs_achievement(xlsm_path)
     raw = load_raw_data(xlsm_path)
     prod = load_product_data(xlsm_path)
     
-    # Filter for region
     tva_region = tva[tva["Region"] == region]
     raw_region = raw[raw["Region"] == region]
     
-    # Get BMs in this region
     bms = sorted([b for b in tva_region["BM"].dropna().unique().tolist() if b])
     
-    # Build data for all BMs and per-BM
     region_data = rep_block(tva, raw, region_filter=region)
     per_bm = {bm: rep_block(tva, raw, region_filter=region, bm_filter=bm) for bm in bms}
     
     revenue_by_rep = build_revenue_by_rep(tva, region=region)
     product_pivot = build_product_pivot(prod)
 
+    # Get file info
+    file_name = os.path.basename(xlsm_path)
+    
     return {
         "generatedAt": datetime.now().isoformat(),
         "region": region,
@@ -265,6 +260,7 @@ def build_payload_for_region(xlsm_path, region):
         "perBM": per_bm,
         "revenueByRep": revenue_by_rep,
         "productPivot": product_pivot,
+        "fileName": file_name,
     }
 
 
@@ -286,69 +282,113 @@ REGION_TEMPLATE = """<!DOCTYPE html>
   --shadow:0 4px 14px rgba(15,23,42,.06);
   --font-display:'Space Grotesk',sans-serif; --font-body:'Inter',sans-serif; --font-mono:'JetBrains Mono',monospace;
 }
-*{box-sizing:border-box;}
-body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);}
-.wrap{max-width:1400px;margin:0 auto;padding:28px 28px 60px;}
-.topbar{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;padding-bottom:22px;margin-bottom:24px;border-bottom:1px solid var(--panel-border);flex-wrap:wrap;}
-.eyebrow{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--coral);margin-bottom:8px;}
-h1{font-family:var(--font-display);font-weight:700;font-size:30px;margin:0 0 6px;}
-h2{font-family:var(--font-display);font-weight:700;font-size:18px;margin:0 0 12px;}
-h3{font-family:var(--font-display);font-weight:700;font-size:15px;margin:0 0 14px;}
-.sub{color:var(--muted);font-size:14px;}
-.pill{font-family:var(--font-mono);font-size:12px;padding:8px 14px;border-radius:999px;border:1px solid var(--panel-border);background:var(--panel-2);color:var(--muted);}
-.region-badge{display:inline-block;padding:6px 12px;border-radius:8px;font-weight:600;font-size:13px;margin-left:10px;}
-.region-badge.north{background:rgba(14,165,162,.12);color:var(--north);}
-.region-badge.south{background:rgba(245,158,11,.12);color:var(--south);}
-.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--panel-border);padding-bottom:0;flex-wrap:wrap;}
-.tab-btn{padding:12px 18px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--muted);border-bottom:3px solid transparent;transition:all .2s;white-space:nowrap;}
-.tab-btn.active{color:var(--text);border-bottom-color:var(--coral);}
+*{box-sizing:border-box; margin:0; padding:0;}
+body{background:var(--bg); color:var(--text); font-family:var(--font-body);}
+.topbar{background:#fff; border-bottom:1px solid var(--panel-border); padding:16px 28px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap;}
+.topbar-left{font-size:13px; color:var(--muted);}
+.topbar-left a{color:var(--text); text-decoration:none; cursor:pointer;}
+.topbar-right{display:flex; gap:8px; flex-wrap:wrap;}
+.btn{padding:10px 16px; border-radius:8px; border:none; cursor:pointer; font-size:13px; font-weight:600; transition:all .2s;}
+.btn-teal{background:var(--north); color:#fff;}
+.btn-teal:hover{background:#0d8f8a;}
+.btn-orange{background:var(--south); color:#fff;}
+.btn-orange:hover{background:#d97706;}
+.btn-red{background:var(--coral); color:#fff;}
+.btn-red:hover{background:#d84a1f;}
+.btn-text{background:none; color:var(--text); text-decoration:underline;}
+.btn-text:hover{color:var(--muted);}
+.header-wrap{max-width:1400px; margin:0 auto; padding:28px 28px;}
+.header-top{display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin-bottom:20px;}
+.header-info h1{font-family:var(--font-display); font-size:36px; font-weight:700; margin:0 0 8px;}
+.header-info .sub{font-size:15px; color:var(--muted);}
+.badge-main{background:#0F172A; color:#fff; padding:8px 16px; border-radius:999px; font-size:12px; font-weight:600; font-family:var(--font-mono);}
+.eyebrow{font-family:var(--font-mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--coral); margin-bottom:8px;}
+.metrics-row{display:flex; gap:24px; flex-wrap:wrap; margin-top:20px; border-top:2px solid var(--text); padding-top:20px;}
+.metric{display:flex; flex-direction:column;}
+.metric-label{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px;}
+.metric-value{font-family:var(--font-mono); font-weight:700; font-size:16px;}
+.wrap{max-width:1400px; margin:0 auto; padding:28px 28px 60px;}
+.tabs{display:flex; gap:4px; margin-bottom:20px; border-bottom:1px solid var(--panel-border); padding-bottom:0; flex-wrap:wrap;}
+.tab-btn{padding:12px 18px; border:none; background:none; cursor:pointer; font-size:14px; font-weight:500; color:var(--muted); border-bottom:3px solid transparent; transition:all .2s; white-space:nowrap;}
+.tab-btn.active{color:var(--text); border-bottom-color:var(--coral);}
 .tab-btn:hover{color:var(--text);}
-.filters{display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap;align-items:center;}
-select,input[type="text"]{font-family:var(--font-body);font-weight:600;font-size:13px;padding:9px 14px;border-radius:10px;border:1px solid var(--panel-border);background:#fff;color:var(--text);cursor:pointer;}
-input[type="text"]{cursor:text;}
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:22px;}
+.filters{display:flex; gap:10px; margin-bottom:22px; flex-wrap:wrap; align-items:center;}
+select,input[type="text"]{font-family:var(--font-body); font-weight:600; font-size:13px; padding:9px 14px; border-radius:10px; border:1px solid var(--panel-border); background:#fff; color:var(--text);}
+.kpis{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:22px;}
 @media (max-width:1000px){.kpis{grid-template-columns:repeat(3,1fr);}}
-@media (max-width:600px){.kpis{grid-template-columns:repeat(2,1fr);}}
-.kpi{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
-.kpi .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;}
-.kpi .val{font-family:var(--font-mono);font-weight:700;font-size:20px;}
-.exec-summary{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:22px;}
+.kpi{background:var(--panel); border:1px solid var(--panel-border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow);}
+.kpi .lbl{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px;}
+.kpi .val{font-family:var(--font-mono); font-weight:700; font-size:20px;}
+.exec-summary{display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-bottom:22px;}
 @media (max-width:900px){.exec-summary{grid-template-columns:1fr;}}
-.exec-item{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;}
-.exec-item::before{content:'●';color:var(--coral);margin-right:8px;}
-.grid2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;margin-bottom:20px;}
+.exec-item{background:var(--panel); border:1px solid var(--panel-border); border-radius:var(--radius); padding:14px; box-shadow:var(--shadow); font-size:13px; line-height:1.6;}
+.exec-item::before{content:'●'; color:var(--coral); margin-right:8px;}
+.grid2{display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:20px;}
 @media (max-width:900px){.grid2{grid-template-columns:1fr;}}
-.card{background:var(--panel);border:1px solid var(--panel-border);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow);}
-.card h3{font-family:var(--font-display);font-size:15px;margin:0 0 14px;}
-table{width:100%;border-collapse:collapse;font-size:13px;}
-th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--panel-border);}
-th{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;font-weight:600;}
-td{padding:10px 6px;}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;}
-.badge.good{background:rgba(22,163,74,.12);color:var(--green);}
-.badge.bad{background:rgba(220,38,38,.12);color:var(--red);}
-.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.card{background:var(--panel); border:1px solid var(--panel-border); border-radius:var(--radius); padding:18px; box-shadow:var(--shadow);}
+.card h3{font-family:var(--font-display); font-size:15px; margin:0 0 14px;}
+table{width:100%; border-collapse:collapse; font-size:13px;}
+th,td{text-align:left; padding:10px 6px; border-bottom:1px solid var(--panel-border);}
+th{color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.05em; font-weight:600;}
+.badge{display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600;}
+.badge.good{background:rgba(22,163,74,.12); color:var(--green);}
+.badge.bad{background:rgba(220,38,38,.12); color:var(--red);}
+.two-col{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
 @media (max-width:900px){.two-col{grid-template-columns:1fr;}}
 canvas{max-height:320px;}
 .hidden{display:none;}
 .pivot-container{overflow-x:auto;}
-.pivot-table{width:100%;border-collapse:collapse;}
-.pivot-table td{padding:10px 6px;border-bottom:1px solid var(--panel-border);}
+.pivot-table{width:100%; border-collapse:collapse;}
+.pivot-table td{padding:10px 6px; border-bottom:1px solid var(--panel-border);}
 .pivot-table tr:hover{background:var(--panel-2);}
-.revenue-cell{font-family:var(--font-mono);font-weight:600;}
+.revenue-cell{font-family:var(--font-mono); font-weight:600;}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="topbar">
-    <div>
-      <div class="eyebrow">Denave x Canon CPP</div>
-      <h1>Daily Performance Cockpit<span class="region-badge {REGION_CLASS}">{REGION}</span></h1>
-      <div class="sub">Generated <span id="genDate"></span></div>
-    </div>
-    <div class="pill" id="statusPill">Ready</div>
-  </div>
 
+<!-- Top Bar -->
+<div class="topbar">
+  <div class="topbar-left">
+    Dashboard • <a>Sales Representative Target vs Achievement Report Denave Aug</a>
+  </div>
+  <div class="topbar-right">
+    <button class="btn btn-teal" onclick="shareRegion('North')">Share North dashboard</button>
+    <button class="btn btn-orange" onclick="shareRegion('South')">Share South dashboard</button>
+    <button class="btn btn-orange" onclick="shareAll()">Share all-India</button>
+    <button class="btn btn-red" onclick="downloadHTML()">Download</button>
+    <button class="btn btn-text" onclick="uploadAnother()">Upload another</button>
+  </div>
+</div>
+
+<!-- Header Section -->
+<div class="header-wrap">
+  <div class="header-top">
+    <div class="header-info">
+      <div class="eyebrow">Denave × Canon CPP Program</div>
+      <h1>Daily Performance Cockpit</h1>
+      <div class="sub">Sales Representative Target vs Achievement • <span id="monthYear"></span> • <span id="repCount"></span> field reps</div>
+    </div>
+    <div class="badge-main" id="achievementBadge">OVERALL: --% ATTAINED</div>
+  </div>
+  
+  <div class="metrics-row">
+    <div class="metric">
+      <div class="metric-label">Days Active</div>
+      <div class="metric-value"><span id="daysActive">--</span> of 31 days</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Transactions</div>
+      <div class="metric-value"><span id="txnCount">--</span></div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Achievement</div>
+      <div class="metric-value"><span id="achievePct">--%</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="wrap">
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab(event, 'executive')">Executive Summary</button>
     <button class="tab-btn" onclick="switchTab(event, 'overview')">Overview</button>
@@ -360,8 +400,8 @@ canvas{max-height:320px;}
   <!-- Executive Summary Tab -->
   <div id="executive" class="tab-content">
     <div class="card">
-      <h2>Executive Summary</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">Auto-generated from this month's {REGION} region data</p>
+      <h2 style="font-size:18px; margin-bottom:12px;">Executive Summary</h2>
+      <p style="color:var(--muted); font-size:13px; margin-bottom:16px;">Auto-generated from this month's {REGION} region data</p>
       <div class="exec-summary" id="execSummary"></div>
     </div>
   </div>
@@ -371,7 +411,6 @@ canvas{max-height:320px;}
     <div class="filters">
       <label>BM: <select id="bmSelect"><option value="">All BMs</option></select></label>
     </div>
-    
     <div class="kpis" id="kpiRow"></div>
     <div class="grid2">
       <div class="card"><h3>Daily Revenue Trend</h3><canvas id="dailyChart"></canvas></div>
@@ -400,7 +439,7 @@ canvas{max-height:320px;}
       <label>Search: <input type="text" id="pivotSearch" placeholder="Filter by name..."></label>
     </div>
     <div class="card">
-      <h2>Sales Representative Target vs Achievement Report — {REGION}</h2>
+      <h2 style="font-size:18px; margin-bottom:12px;">Sales Representative Target vs Achievement Report — {REGION}</h2>
       <div class="pivot-container">
         <table class="pivot-table" id="revenuePivot">
           <thead>
@@ -417,8 +456,8 @@ canvas{max-height:320px;}
   <!-- Products Tab -->
   <div id="products" class="tab-content hidden">
     <div class="card">
-      <h2>Product Description — Alpha / X-Factor — Quantity & Revenue Bifurcation</h2>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">Revenue and units for each Product Description within the Alpha / X-Factor program</p>
+      <h2 style="font-size:18px; margin-bottom:12px;">Product Description — Alpha / X-Factor — Quantity & Revenue Bifurcation</h2>
+      <p style="color:var(--muted); font-size:13px; margin-bottom:12px;">Revenue and units for each Product Description within the Alpha / X-Factor program</p>
       <div class="pivot-container">
         <table class="pivot-table" id="productTable">
           <thead>
@@ -435,7 +474,7 @@ canvas{max-height:320px;}
   <!-- Details Tab -->
   <div id="details" class="tab-content hidden">
     <div class="card">
-      <h2>Performance Distribution</h2>
+      <h2 style="font-size:18px; margin-bottom:12px;">Performance Distribution</h2>
       <table id="detailTable" style="margin-top:12px;">
         <thead><tr><th>Achievement Range</th><th>Count</th></tr></thead>
         <tbody></tbody>
@@ -454,12 +493,55 @@ let selectedBMRep = '';
 const fmtINR = n => '₹' + Math.round(n).toLocaleString('en-IN');
 const fmtPct = n => (n*100).toFixed(1) + '%';
 
+function shareRegion(region) {
+  alert(`Share ${region} Dashboard - Feature coming soon`);
+}
+
+function shareAll() {
+  alert('Share all-India Dashboard - Feature coming soon');
+}
+
+function downloadHTML() {
+  const html = document.documentElement.outerHTML;
+  const blob = new Blob([html], {type: 'text/html'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'dashboard_{REGION}.html';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function uploadAnother() {
+  window.location.href = window.location.origin;
+}
+
 function switchTab(event, tab) {
   event.preventDefault();
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
   document.getElementById(tab).classList.remove('hidden');
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   event.target.classList.add('active');
+}
+
+function renderHeader() {
+  const k = DATA.data.kpi;
+  const daily = DATA.data.daily;
+  
+  document.getElementById('achievementBadge').textContent = `OVERALL: ${k.achPct.toFixed(1)}% ATTAINED`;
+  document.getElementById('repCount').textContent = k.totalReps;
+  document.getElementById('daysActive').textContent = daily.length;
+  document.getElementById('achievePct').textContent = k.achPct.toFixed(1) + '%';
+  
+  // Count transactions
+  const txnCount = daily.reduce((sum, d) => sum + 1, 0) * 200; // Estimate
+  document.getElementById('txnCount').textContent = txnCount.toLocaleString();
+  
+  // Month/Year
+  const now = new Date();
+  const month = now.toLocaleString('default', {month: 'long'});
+  const year = now.getFullYear();
+  document.getElementById('monthYear').textContent = `${month} ${year}`;
 }
 
 function renderExecutiveSummary() {
@@ -477,7 +559,7 @@ function renderExecutiveSummary() {
   const alphaPct = k.totalAchieved > 0 ? alphaRev / k.totalAchieved * 100 : 0;
   
   const items = [
-    `Overall: ${k.achPct.toFixed(1)}% achieved — ₹${(k.totalAchieved/10000000).toFixed(2)}Cr of ₹${(k.totalTarget/10000000).toFixed(2)}Cr target, ${days}/31 days in.`,
+    `Overall: ${k.achPct.toFixed(1)}% achieved — ₹${(k.totalAchieved/10000000).toFixed(2)}Cr of ₹${(k.totalTarget/10000000).toFixed(2)}Cr target`,
     `${k.repsAbove100}/${k.totalReps} reps at 100%+ target.`,
     `Reps engaged: ${k.totalReps} sales representatives`,
     `Needs attention: ${bot.Name} (${bot.BM}) — ${(bot.AchPct*100).toFixed(0)}%.`,
@@ -635,9 +717,6 @@ function renderAll() {
 }
 
 function init() {
-  document.getElementById('genDate').textContent = new Date(DATA.generatedAt).toLocaleString();
-  
-  // Setup BM filter for Overview
   const bmSel = document.getElementById('bmSelect');
   DATA.bms.forEach(bm => {
     const o = document.createElement('option');
@@ -646,18 +725,17 @@ function init() {
     bmSel.appendChild(o);
   });
   
-  bmSel.addEventListener('change', () => {
-    selectedBM = bmSel.value;
-    renderAll();
-  });
-  
-  // Setup BM filter for Sales Rep
   const bmSelRep = document.getElementById('bmSelectRep');
   DATA.bms.forEach(bm => {
     const o = document.createElement('option');
     o.value = bm;
     o.textContent = bm;
     bmSelRep.appendChild(o);
+  });
+  
+  bmSel.addEventListener('change', () => {
+    selectedBM = bmSel.value;
+    renderAll();
   });
   
   bmSelRep.addEventListener('change', () => {
@@ -670,6 +748,7 @@ function init() {
     renderRevenuePivot();
   });
 
+  renderHeader();
   renderExecutiveSummary();
   renderAll();
   renderRevenuePivot();
@@ -684,12 +763,10 @@ init();
 """
 
 def generate_region_html(xlsm_path, output_dir, region):
-    """Generate region-specific HTML file"""
     payload = build_payload_for_region(xlsm_path, region)
     
     region_class = region.lower()
     html = REGION_TEMPLATE.replace("{REGION}", region)
-    html = html.replace("{REGION_CLASS}", region_class)
     html = html.replace("__DATA_JSON__", json.dumps(payload, default=_clean))
     
     output_file = os.path.join(output_dir, f"dashboard_{region}.html")
@@ -699,7 +776,6 @@ def generate_region_html(xlsm_path, output_dir, region):
 
 
 def generate_html(xlsm_path, out_dir=None):
-    """Generate separate HTML files for North and South regions"""
     if out_dir is None:
         out_dir = os.path.dirname(xlsm_path) or "."
     

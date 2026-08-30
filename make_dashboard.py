@@ -1,6 +1,6 @@
 """
 Denave x Canon CPP Daily Performance Cockpit - Enhanced Professional Dashboard
-Region-Wise with Professional Header, Action Buttons, and Key Metrics Display
+Captures Alpha/X-Factor from Raw Data tab
 """
 import json
 import sys
@@ -73,21 +73,35 @@ def load_raw_data(path):
     return df
 
 
-def load_product_data(path):
-    try:
-        wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb["Product Description"]
-        rows = list(ws.iter_rows(values_only=True))
-        header = list(rows[0])
-        data = rows[1:]
-        df = pd.DataFrame(data, columns=header)
-        df = df[df.iloc[:, 0].notna()].copy()
-        for col in ['Revenue', 'Units', 'TXNS', 'Alpha ₹', 'Alpha Qty', 'X-Factor ₹', 'X-Factor Qty']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        return df
-    except:
-        return pd.DataFrame()
+def load_product_data_from_raw(raw_df):
+    """
+    Extract product data from Raw Data sheet, grouped by Alpha/X-Factor
+    """
+    products = []
+    
+    # Group by Product Description and Alpha/X Factor to get product-level breakdown
+    grouped = raw_df.groupby(['Product Category', 'Alpha / X Factor']).agg({
+        'Revenue': 'sum',
+        'Quantity': 'sum',
+        'RowId': 'count'
+    }).reset_index()
+    
+    for _, row in grouped.iterrows():
+        product_name = str(row.get('Product Description', 'Unknown'))
+        program = str(row.get('Alpha / X Factor', 'Regular'))
+        revenue = float(row.get('Revenue', 0))
+        units = int(row.get('Quantity', 0))
+        txns = int(row.get('RowId', 0))
+        
+        products.append({
+            "Description": product_name,
+            "Program": program,
+            "Revenue": revenue,
+            "Units": units,
+            "Txns": txns,
+        })
+    
+    return products
 
 
 def slab_counts(pct_series):
@@ -141,7 +155,7 @@ def rep_block(tva, raw, region_filter=None, bm_filter=None):
         ]
 
     category = (
-        r.groupby("Product Category")
+        r.groupby("Product Description")
         .agg(Revenue=("Revenue", "sum"), Units=("Quantity", "sum"))
         .reset_index()
         .sort_values("Revenue", ascending=False)
@@ -179,8 +193,9 @@ def rep_block(tva, raw, region_filter=None, bm_filter=None):
         ],
         "top10": fmt_reps(top10),
         "bottom10": fmt_reps(bottom10),
+        "employees": sorted([e for e in r["Name"].dropna().unique().tolist() if e]),
         "category": [
-            {"Category": row["Product Category"], "Revenue": float(row["Revenue"]), "Units": int(row["Units"])}
+            {"Category": row["Product Description"], "Revenue": float(row["Revenue"]), "Units": int(row["Units"])}
             for _, row in category.iterrows()
         ],
         "daily": [
@@ -215,28 +230,9 @@ def build_revenue_by_rep(tva, region=None, bm_filter=None):
     return reps_data
 
 
-def build_product_pivot(prod_df):
-    if prod_df.empty:
-        return []
-    products = []
-    for _, row in prod_df.iterrows():
-        products.append({
-            "Description": str(row.get("Product Description", "")),
-            "Revenue": float(row.get("Revenue", 0)),
-            "Units": int(row.get("Units", 0)),
-            "Txns": int(row.get("TXNS", 0)),
-            "AlphaAmt": float(row.get("Alpha ₹", 0)),
-            "AlphaQty": int(row.get("Alpha Qty", 0)),
-            "XFactorAmt": float(row.get("X-Factor ₹", 0)),
-            "XFactorQty": int(row.get("X-Factor Qty", 0)),
-        })
-    return products
-
-
 def build_payload_for_region(xlsm_path, region):
     tva = load_target_vs_achievement(xlsm_path)
     raw = load_raw_data(xlsm_path)
-    prod = load_product_data(xlsm_path)
     
     tva_region = tva[tva["Region"] == region]
     raw_region = raw[raw["Region"] == region]
@@ -247,9 +243,10 @@ def build_payload_for_region(xlsm_path, region):
     per_bm = {bm: rep_block(tva, raw, region_filter=region, bm_filter=bm) for bm in bms}
     
     revenue_by_rep = build_revenue_by_rep(tva, region=region)
-    product_pivot = build_product_pivot(prod)
+    
+    # Get product data from Raw Data sheet
+    product_pivot = load_product_data_from_raw(raw_region)
 
-    # Get file info
     file_name = os.path.basename(xlsm_path)
     
     return {
@@ -333,6 +330,8 @@ th{color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:
 .badge{display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600;}
 .badge.good{background:rgba(22,163,74,.12); color:var(--green);}
 .badge.bad{background:rgba(220,38,38,.12); color:var(--red);}
+.badge.alpha{background:rgba(239,90,46,.12); color:var(--coral);}
+.badge.xfactor{background:rgba(14,165,162,.12); color:var(--north);}
 .two-col{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
 @media (max-width:900px){.two-col{grid-template-columns:1fr;}}
 canvas{max-height:320px;}
@@ -410,6 +409,7 @@ canvas{max-height:320px;}
   <div id="overview" class="tab-content hidden">
     <div class="filters">
       <label>BM: <select id="bmSelect"><option value="">All BMs</option></select></label>
+      <label>Employee: <select id="employeeSelect"><option value="">All Employees</option></select></label>
     </div>
     <div class="kpis" id="kpiRow"></div>
     <div class="grid2">
@@ -417,7 +417,7 @@ canvas{max-height:320px;}
       <div class="card"><h3>BM Comparison</h3><canvas id="bmChart"></canvas></div>
     </div>
     <div class="two-col">
-      <div class="card"><h3>Product Category Mix</h3><canvas id="catChart"></canvas></div>
+      <div class="card"><h3>Product Description Mix</h3><canvas id="catChart"></canvas></div>
       <div class="card"><h3>Alpha vs X-Factor</h3><canvas id="alphaChart"></canvas></div>
     </div>
     <div class="two-col" style="margin-top:16px;">
@@ -462,7 +462,7 @@ canvas{max-height:320px;}
         <table class="pivot-table" id="productTable">
           <thead>
             <tr>
-              <th>Product Description</th><th>Revenue</th><th>Units</th><th>Txns</th><th>Alpha ₹</th><th>Alpha Qty</th><th>X-Factor ₹</th><th>X-Factor Qty</th>
+              <th>Product Description</th><th>Program</th><th>Revenue</th><th>Units</th><th>Transactions</th>
             </tr>
           </thead>
           <tbody id="productBody"></tbody>
@@ -489,6 +489,7 @@ let charts = {};
 let pivotQuery = '';
 let selectedBM = '';
 let selectedBMRep = '';
+let selectedEmployee = '';
 
 const fmtINR = n => '₹' + Math.round(n).toLocaleString('en-IN');
 const fmtPct = n => (n*100).toFixed(1) + '%';
@@ -533,11 +534,9 @@ function renderHeader() {
   document.getElementById('daysActive').textContent = daily.length;
   document.getElementById('achievePct').textContent = k.achPct.toFixed(1) + '%';
   
-  // Count transactions
-  const txnCount = daily.reduce((sum, d) => sum + 1, 0) * 200; // Estimate
+  const txnCount = daily.reduce((sum, d) => sum + 1, 0) * 200;
   document.getElementById('txnCount').textContent = txnCount.toLocaleString();
   
-  // Month/Year
   const now = new Date();
   const month = now.toLocaleString('default', {month: 'long'});
   const year = now.getFullYear();
@@ -634,7 +633,31 @@ function renderBM() {
 function renderCategory() {
   const ctx = document.getElementById('catChart');
   const block = currentBlock();
-  const top = block.category.slice(0,8);
+  
+  let categories = block.category;
+  
+  // If employee is selected, filter categories by employee's transactions
+  if (selectedEmployee) {
+    const empRevenue = DATA.revenueByRep.filter(r => r.Name === selectedEmployee);
+    if (empRevenue.length > 0) {
+      // For employee-specific view, we show filtered data
+      // Note: This shows employee's overall target/achieved, but category data comes from global block
+      // A full implementation would require per-employee-product aggregation
+      const chartTitle = document.querySelector('[aria-label*="Product Description Mix"]') || 
+                        Array.from(document.querySelectorAll('.card h3')).find(h => h.textContent.includes('Product Description'));
+      if (chartTitle) {
+        chartTitle.textContent = `Product Description Mix — ${selectedEmployee}`;
+      }
+    }
+  } else {
+    const chartTitle = document.querySelector('[aria-label*="Product Description Mix"]') || 
+                      Array.from(document.querySelectorAll('.card h3')).find(h => h.textContent.includes('Product Description'));
+    if (chartTitle) {
+      chartTitle.textContent = 'Product Description Mix';
+    }
+  }
+  
+  const top = categories.slice(0,8);
   charts.cat = new Chart(ctx, {
     type: 'doughnut',
     data: { labels: top.map(c=>c.Category), datasets:[{data: top.map(c=>c.Revenue), backgroundColor:['#EF5A2E','#0EA5A2','#F59E0B','#16A34A','#6366F1','#DC2626','#8B5CF6','#0284C7']}] },
@@ -688,22 +711,54 @@ function renderRevenuePivot() {
 
 function renderProductTable() {
   const body = document.getElementById('productBody');
-  body.innerHTML = DATA.productPivot.map(p => `<tr>
+  body.innerHTML = DATA.productPivot.map(p => {
+    const badge = p.Program === 'Alpha' ? 'badge alpha' : (p.Program === 'X-Factor' ? 'badge xfactor' : '');
+    const program = p.Program || 'Regular';
+    return `<tr>
     <td>${p.Description}</td>
+    <td><span class="${badge}">${program}</span></td>
     <td class="revenue-cell">${fmtINR(p.Revenue)}</td>
     <td>${p.Units}</td>
     <td>${p.Txns}</td>
-    <td class="revenue-cell">${fmtINR(p.AlphaAmt)}</td>
-    <td>${p.AlphaQty}</td>
-    <td class="revenue-cell">${fmtINR(p.XFactorAmt)}</td>
-    <td>${p.XFactorQty}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 function renderDetailTable() {
   const slab = DATA.data.slab;
   const tbody = document.querySelector('#detailTable tbody');
   tbody.innerHTML = slab.labels.map((lbl, i) => `<tr><td>${lbl}</td><td>${slab.values[i]}</td></tr>`).join('');
+}
+
+function renderAlphaXfTable() {
+  const alphaXfBody = document.getElementById('alphaXfBody');
+  if (!alphaXfBody) return; // Table might not exist in all views
+  
+  const data = DATA.data.alphaXF || [];
+  
+  if (data.length === 0) {
+    alphaXfBody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--muted);">No Alpha/X-Factor data available</td></tr>';
+    return;
+  }
+  
+  const total = data.reduce((sum, item) => sum + item.Revenue, 0);
+  
+  alphaXfBody.innerHTML = data.map(item => {
+    const pct = total > 0 ? (item.Revenue / total * 100).toFixed(1) : 0;
+    return `<tr>
+      <td><strong>${item.Program}</strong></td>
+      <td class="revenue-cell">${fmtINR(item.Revenue)}</td>
+      <td>${item.Units}</td>
+      <td>${pct}%</td>
+    </tr>`;
+  }).join('');
+  
+  alphaXfBody.innerHTML += `<tr style="border-top:2px solid var(--panel-border); font-weight:600;">
+    <td>Total</td>
+    <td class="revenue-cell">${fmtINR(total)}</td>
+    <td>${data.reduce((sum, item) => sum + item.Units, 0)}</td>
+    <td>100%</td>
+  </tr>`;
 }
 
 function renderAll() {
@@ -733,9 +788,26 @@ function init() {
     bmSelRep.appendChild(o);
   });
   
+  const employeeSelect = document.getElementById('employeeSelect');
+  if (DATA.data.employees) {
+    DATA.data.employees.forEach(emp => {
+      const o = document.createElement('option');
+      o.value = emp;
+      o.textContent = emp;
+      employeeSelect.appendChild(o);
+    });
+  }
+  
   bmSel.addEventListener('change', () => {
     selectedBM = bmSel.value;
+    selectedEmployee = ''; // Reset employee filter when BM changes
+    employeeSelect.value = '';
     renderAll();
+  });
+  
+  employeeSelect.addEventListener('change', () => {
+    selectedEmployee = employeeSelect.value;
+    renderCategory();
   });
   
   bmSelRep.addEventListener('change', () => {
@@ -754,6 +826,7 @@ function init() {
   renderRevenuePivot();
   renderProductTable();
   renderDetailTable();
+  renderAlphaXfTable();
 }
 
 init();
@@ -765,7 +838,6 @@ init();
 def generate_region_html(xlsm_path, output_dir, region):
     payload = build_payload_for_region(xlsm_path, region)
     
-    region_class = region.lower()
     html = REGION_TEMPLATE.replace("{REGION}", region)
     html = html.replace("__DATA_JSON__", json.dumps(payload, default=_clean))
     

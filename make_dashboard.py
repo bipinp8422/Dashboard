@@ -80,7 +80,7 @@ def load_product_data_from_raw(raw_df):
     products = []
     
     # Group by Product Description and Alpha/X Factor to get product-level breakdown
-    grouped = raw_df.groupby(['Product Category', 'Alpha / X Factor']).agg({
+    grouped = raw_df.groupby(['Product Description', 'Alpha / X Factor']).agg({
         'Revenue': 'sum',
         'Quantity': 'sum',
         'RowId': 'count'

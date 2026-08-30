@@ -470,13 +470,7 @@ canvas{max-height:320px}
   <div class="topbar-left">
     <span style="color:var(--coral-light)">●</span> Dashboard • <a>Sales Representative Target vs Achievement Report Denave Aug</a>
   </div>
-  <div class="topbar-right">
-    <button class="btn btn-teal" onclick="shareRegion('North')">Share North</button>
-    <button class="btn btn-orange" onclick="shareRegion('South')">Share South</button>
-    <button class="btn btn-orange" onclick="shareAll()">Share All-India</button>
-    <button class="btn btn-red" onclick="downloadHTML()">Download</button>
-    <button class="btn btn-text" onclick="uploadAnother()">Upload New</button>
-  </div>
+  <div class="topbar-right"></div>
 </div>
 
 <div class="header-wrap">
@@ -612,17 +606,6 @@ const fmtPct = n => (n*100).toFixed(1) + '%';
 const fmtCr = n => 'Rs ' + (n/10000000).toFixed(2) + 'Cr';
 const fmtL = n => 'Rs ' + (n/100000).toFixed(1) + 'L';
 
-function shareRegion(region) {
-  const text = 'Denave x Canon CPP Dashboard - ' + region + ' Region\nOverall: ' + DATA.data.kpi.achPct.toFixed(1) + '% achieved';
-  if (navigator.share) {
-    navigator.share({ title: 'CPP Dashboard', text: text });
-  } else {
-    navigator.clipboard.writeText(text);
-    showToast('Dashboard link copied to clipboard!');
-  }
-}
-function shareAll() { shareRegion('All-India'); }
-
 function showToast(msg) {
   const toast = document.createElement('div');
   toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-card);border:1px solid var(--border);padding:14px 24px;border-radius:12px;color:var(--text);font-weight:600;z-index:9999;backdrop-filter:blur(20px);box-shadow:var(--shadow-lg);animation:fadeInUp 0.3s ease-out;';
@@ -630,19 +613,6 @@ function showToast(msg) {
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 3000);
 }
-
-function downloadHTML() {
-  const html = document.documentElement.outerHTML;
-  const blob = new Blob([html], {type: 'text/html'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'dashboard_{REGION}.html';
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('Dashboard downloaded!');
-}
-function uploadAnother() { window.location.href = window.location.origin; }
 
 function switchTab(event, tab) {
   event.preventDefault();
